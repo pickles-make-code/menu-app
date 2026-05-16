@@ -157,6 +157,7 @@ Rules:
       error: err.message,
       _guruSuccess: guruSuccess,
       _textLen: recipeText.length,
+      _textPreview: recipeText.slice(0, 800),
     });
   }
 }
