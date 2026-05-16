@@ -52,6 +52,7 @@ Rules:
       const data = await callClaude(prompt, ANTHROPIC_KEY);
       return res.status(200).json(data);
     } catch (err) {
+      console.error("Custom recipe failed:", err.message);
       return res.status(500).json({ error: err.message });
     }
   }
@@ -151,7 +152,12 @@ Rules:
       _source: guruSuccess ? "cooking.guru" : "url-inference",
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error("Extract failed:", err.message, "| guruSuccess:", guruSuccess, "| textLen:", recipeText.length);
+    return res.status(500).json({
+      error: err.message,
+      _guruSuccess: guruSuccess,
+      _textLen: recipeText.length,
+    });
   }
 }
 
