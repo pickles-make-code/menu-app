@@ -1,0 +1,60 @@
+Lets start fresh with this. 
+
+Things i like
+- menu and library, and list tabs
+- option to add custom name 
+- pick recipe button to fill in the menu days 
+
+Things i dont like
+- link imput on all pages, lets have a dedicated pages to link imput. also remove the bulk imput. 
+- the name, Change it to Menu
+- in the list you move the days aroud not the recipes. the days should be static and recipes move 
+- app should be dark mode themed 
+
+lets talk UI 
+App Tabs
+- Tab 1 
+Menu 
+the days should be static areas where recipes cards can be displayed with the name, subtitles that have cuisine and overall time it take (prep+cook) and skill level. 
+if a day is empt it should have a ADD+ button 
+
+- Tab 2 
+Library 
+there should be the library of all the added recipes in here, with a whats new section (shows the last 5 recipes added)
+i would like sub sections
+- cuisine 
+- favourites 
+- all
+within the recipe cards there should be a function to 
+multiply the serving size (for extra guests or batch cooking)
+add/remove from favourites or delete from the app
+also change skill level,cuisine or ingriedents (this should not be easy to do by mistake but also not to difficult to make me not want to do it)(maybe an edit icon where it unlocks the card and things can be changed)   
+
+- Tab 3 
+List - this should have all the ingredients of all the recipes added to the menu for that week, i would like it to combine/collate the ingriendints so there is a total. this list should also be tickable
+list items should be broken down into (use your knowledge for this, however if unsure ask and remember the answer so next time it goes to the right spot)
+- dry/packaged
+- meat/seafood/poultry
+- deli
+- fruit/veg
+- freezer
+- dairy
+ALL INGREDIENTS ARE IN METRIC 
+
+- Tab 4 
+Import page - this is where you import the instagram,tiktok or YT link 
+there should also be a section to add my own recipes which will open a new page where i am propmted to enter the title, ingredients, method (you can work out the cuisine and skill level for the subtitle and prep and cook time using base cooking knowledge and other recipes for reference) 
+
+FUNCTION
+Here is the outline of the ovrall functionality of the app
+(in this portion the "/" is used to demonstrate the next step)
+
+Link goes in/app takes link to cooking.guru to read the ingredients and the method/come back to app/saves new recipe to library/recipes can then be selected and assigned to day/ add ingriedients to the shopping list 
+
+
+UX
+- when a new recipe is imported it should promt if you want to add it to this weeks menu and if so what day if not then it adds to library as usual
+- once recipe has been used in 3 weekly menus add to favourites
+
+
+I want this to be an online app that myself and someone else can use on phone and pc, i am familier with firebase/vercel/vscode/github and will take that route, but for now i would like to test it in the claude terminal until i am happy 
