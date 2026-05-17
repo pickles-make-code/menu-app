@@ -352,9 +352,9 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
             {recipe.ingredients?.map((ing, i) => {
               const amt = multiplyAmount(ing.amount, servMult);
               return (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+                <div key={i} style={{ display: "flex", gap: 12, padding: "5px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+                  <span style={{ color: "var(--accent2)", fontWeight: 500, minWidth: 70, flexShrink: 0 }}>{amt}</span>
                   <span style={{ color: "var(--text2)" }}>{ing.item}</span>
-                  <span style={{ color: "var(--accent2)", fontWeight: 500 }}>{amt}</span>
                 </div>
               );
             })}
@@ -1244,14 +1244,19 @@ export default function App() {
                                   {item.checked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
                                 </div>
                                 <span style={{
+                                  fontSize: 13, fontWeight: 600,
+                                  color: item.checked ? "var(--text3)" : "var(--accent2)",
+                                  minWidth: 70, flexShrink: 0,
+                                  textDecoration: item.checked ? "line-through" : "none",
+                                }}>
+                                  {item.combinedAmount}
+                                </span>
+                                <span style={{
                                   flex: 1, fontSize: 14,
                                   color: item.checked ? "var(--text3)" : "var(--text)",
                                   textDecoration: item.checked ? "line-through" : "none",
                                   transition: "all 0.15s",
                                 }}>{item.item}</span>
-                                <span style={{ fontSize: 13, fontWeight: 600, color: item.checked ? "var(--text3)" : "var(--accent2)" }}>
-                                  {item.combinedAmount}
-                                </span>
                                 {hasBreakdown && (
                                   <button
                                     style={{ background: "none", fontSize: 11, color: "var(--text3)", padding: "2px 6px", borderRadius: 4, border: "1px solid var(--border)" }}
@@ -1264,9 +1269,9 @@ export default function App() {
                               {isExpanded && hasBreakdown && (
                                 <div style={{ borderTop: "1px solid var(--border)", padding: "8px 14px 10px 46px" }}>
                                   {item.entries.map((e, i) => (
-                                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text2)", padding: "2px 0" }}>
+                                    <div key={i} style={{ display: "flex", gap: 12, fontSize: 12, color: "var(--text2)", padding: "2px 0" }}>
+                                      <span style={{ color: "var(--text3)", minWidth: 60, flexShrink: 0 }}>{e.amount}</span>
                                       <span>{e.recipe}</span>
-                                      <span style={{ color: "var(--text3)" }}>{e.amount}</span>
                                     </div>
                                   ))}
                                 </div>
