@@ -32,15 +32,16 @@ function detectPlatform(url) {
   if (/instagram\.com/i.test(url)) return "instagram";
   if (/tiktok\.com/i.test(url)) return "tiktok";
   if (/youtube\.com|youtu\.be/i.test(url)) return "youtube";
+  if (/^https?:\/\/.+\..+/i.test(url)) return "web";
   return "unknown";
 }
 
 function platformLabel(p) {
-  return { instagram:"Instagram", tiktok:"TikTok", youtube:"YouTube" }[p] || "Link";
+  return { instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube", web: "Web", custom: "Custom" }[p] || "Link";
 }
 
 function platformIcon(p) {
-  return { instagram:"📸", tiktok:"🎵", youtube:"▶️" }[p] || "🔗";
+  return { instagram: "📸", tiktok: "🎵", youtube: "▶️", web: "🌐", custom: "✏️" }[p] || "🔗";
 }
 
 // Convert cooking.guru URL for a given source URL
@@ -642,11 +643,11 @@ function ImportPage({ library, onImported, showBanner }) {
   async function handleImport() {
     if (!url.trim()) return;
     const platform = detectPlatform(url.trim());
-    if (platform === "unknown") { setError("Please enter an Instagram, TikTok or YouTube link."); return; }
+    if (platform === "unknown") { setError("Please enter a valid URL (must start with http:// or https://)."); return; }
     if (library.find((r) => r.sourceUrl === url.trim())) { setError("This link is already in your library."); return; }
     setError(""); setLoading(true);
     try {
-      setStage(`Sending to cooking.guru to extract recipe...`);
+      setStage("Fetching page content...");
       await new Promise((r) => setTimeout(r, 600));
       setStage("Extracting ingredients...");
       const data = await fetchViaAPI(url.trim());
@@ -706,7 +707,7 @@ function ImportPage({ library, onImported, showBanner }) {
     <div style={{ padding: "0 0 40px" }}>
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Import</div>
-        <div style={{ fontSize: 13, color: "var(--text2)" }}>Add a recipe from social media or create your own</div>
+        <div style={{ fontSize: 13, color: "var(--text2)" }}>Paste any recipe link, or write your own</div>
       </div>
 
       {/* Mode switcher */}
@@ -734,7 +735,7 @@ function ImportPage({ library, onImported, showBanner }) {
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16, pointerEvents: "none" }}>🔗</span>
                 <input
                   style={{ ...inputStyle, paddingLeft: 36 }}
-                  placeholder="Instagram, TikTok or YouTube URL..."
+                  placeholder="Recipe URL — website, YouTube, TikTok, Instagram..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !loading && handleImport()}
@@ -749,8 +750,8 @@ function ImportPage({ library, onImported, showBanner }) {
           </div>
 
           <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
-            <span style={{ color: "var(--accent)", fontWeight: 600 }}>How it works:</span> Your link is sent to cooking.guru which reads the video and extracts the full recipe — then it's saved to your library.
-            <br />Works with <span style={{ color: "var(--text)" }}>Instagram Reels</span>, <span style={{ color: "var(--text)" }}>TikTok</span> and <span style={{ color: "var(--text)" }}>YouTube</span>.
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>How it works:</span> Paste any recipe link — a recipe website, YouTube video, TikTok or Instagram reel. We pull the page content (or video caption / description) and use AI to extract the ingredients and times.
+            <br />Best results: <span style={{ color: "var(--text)" }}>recipe websites</span> (AllRecipes, BBC Food, NYT Cooking, etc.), <span style={{ color: "var(--text)" }}>TikTok</span>, and <span style={{ color: "var(--text)" }}>YouTube</span>. Instagram is limited to whatever the public caption shows.
           </div>
 
           {loading && (

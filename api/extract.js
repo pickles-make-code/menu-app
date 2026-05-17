@@ -1,7 +1,7 @@
 // api/extract.js
 // Vercel serverless function — runs server-side, no CORS issues
 //
-// GET  /api/extract?url=...          → extract recipe from social link via cooking.guru
+// GET  /api/extract?url=...          → extract recipe from a URL (recipe site, YouTube, TikTok, Instagram)
 // POST /api/extract {custom:true}    → structure a custom recipe from user ingredients
 
 // Shared category guidance — used in every prompt so Claude assigns the right
@@ -15,6 +15,8 @@ const CATEGORY_GUIDE = `Each ingredient's "category" must be assigned by where i
 - freezer: frozen vegetables (peas, corn, spinach), frozen fruit/berries, frozen pastry, frozen prawns, ice cream
 
 Examples: "salmon fillets" → meat. "rigatoni" → dry. "jar of pesto" → deli. "frozen peas" → freezer. "fresh basil" → fruit_veg. "parmesan" → dairy.`;
+
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -31,12 +33,43 @@ export default async function handler(req, res) {
 
   // ── MODE A: Custom recipe ──────────────────────────────────
   if (req.method === "POST" && req.body?.custom) {
-    const { title, ingredients, method } = req.body;
-    if (!title || !ingredients) {
-      return res.status(400).json({ error: "Title and ingredients are required." });
-    }
+    return handleCustom(req, res, ANTHROPIC_KEY);
+  }
 
-    const prompt = `You are a recipe AI. Categorise and structure this custom recipe.
+  // ── MODE B: URL extraction ─────────────────────────────────
+  const url = req.query?.url || req.body?.url;
+  if (!url) return res.status(400).json({ error: "No URL provided." });
+
+  try {
+    const gathered = await gatherFromUrl(url);
+    if (!gathered.raw || gathered.raw.trim().length < 20) {
+      return res.status(422).json({
+        error: gathered.platform === "Instagram"
+          ? "Instagram doesn't expose enough info publicly. Try a TikTok, YouTube, or web recipe link — or use Custom Recipe."
+          : "Couldn't find recipe content on that page. Try a different link or use Custom Recipe.",
+        _source: gathered.platform,
+      });
+    }
+    const prompt = buildExtractPrompt(gathered);
+    const data = await callClaude(prompt, ANTHROPIC_KEY);
+    return res.status(200).json({
+      ...data,
+      _source: gathered.platform,
+    });
+  } catch (err) {
+    console.error("Extract failed:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ─── Custom recipe handler ────────────────────────────────────
+async function handleCustom(req, res, ANTHROPIC_KEY) {
+  const { title, ingredients, method } = req.body;
+  if (!title || !ingredients) {
+    return res.status(400).json({ error: "Title and ingredients are required." });
+  }
+
+  const prompt = `You are a recipe AI. Categorise and structure this custom recipe.
 Title: ${title}
 Ingredients: ${ingredients}
 ${method ? `Method (use this to accurately estimate prep time, cook time, and skill level only):\n${method}` : ""}
@@ -63,62 +96,318 @@ Rules:
 - Infer cuisine, skill level, and times from the title, ingredients, and method.
 - Do NOT return the method in the JSON output.`;
 
-    try {
-      const data = await callClaude(prompt, ANTHROPIC_KEY);
-      return res.status(200).json(data);
-    } catch (err) {
-      console.error("Custom recipe failed:", err.message);
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  // ── MODE B: Social media link extraction ───────────────────
-  const url = req.query?.url || req.body?.url;
-  if (!url) return res.status(400).json({ error: "No URL provided." });
-
-  const platform = /instagram/.test(url) ? "Instagram"
-    : /tiktok/.test(url) ? "TikTok"
-    : /youtube|youtu\.be/.test(url) ? "YouTube"
-    : "social media";
-
-  // Step 1: Try cooking.guru (server-side, no CORS)
-  let recipeText = "";
-  let guruSuccess = false;
   try {
-    const guruRes = await fetch(
-      `https://cooking.guru/recipe?url=${encodeURIComponent(url)}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; MenuApp/1.0)",
-          "Accept": "text/html,application/xhtml+xml",
-        },
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-    if (guruRes.ok) {
-      const html = await guruRes.text();
-      recipeText = html
-        .replace(/<script[\s\S]*?<\/script>/gi, "")
-        .replace(/<style[\s\S]*?<\/style>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&amp;/g, "&").replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">").replace(/&nbsp;/g, " ")
-        .replace(/\s+/g, " ").trim().slice(0, 5000);
-      guruSuccess = recipeText.length > 200;
+    const data = await callClaude(prompt, ANTHROPIC_KEY);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("Custom recipe failed:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ─── URL detection ────────────────────────────────────────────
+function detectSource(url) {
+  if (/instagram\.com/i.test(url)) return "instagram";
+  if (/tiktok\.com/i.test(url)) return "tiktok";
+  if (/youtube\.com|youtu\.be/i.test(url)) return "youtube";
+  return "web";
+}
+
+// ─── Main URL gatherer ────────────────────────────────────────
+async function gatherFromUrl(url) {
+  const source = detectSource(url);
+
+  if (source === "youtube") return await gatherYouTube(url);
+  if (source === "tiktok") return await gatherTikTok(url);
+  if (source === "instagram") return await gatherInstagram(url);
+  return await gatherWebRecipe(url);
+}
+
+// ─── YouTube via oEmbed + page scrape ─────────────────────────
+async function gatherYouTube(url) {
+  let title = "", author = "";
+  // oEmbed (cheap, no auth)
+  try {
+    const r = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      title = j.title || "";
+      author = j.author_name || "";
     }
   } catch (e) {
-    console.log("cooking.guru failed:", e.message);
+    console.log("YT oEmbed failed:", e.message);
+  }
+  // Description via page scrape
+  let description = "";
+  try {
+    const html = await fetchHtml(url);
+    description = extractMeta(html, "og:description") || extractMeta(html, "description") || "";
+  } catch (e) {
+    console.log("YT page scrape failed:", e.message);
+  }
+  return {
+    platform: "YouTube",
+    kind: "video",
+    title,
+    raw: [
+      title && `Title: ${title}`,
+      author && `Channel: ${author}`,
+      description && `Description: ${description}`,
+    ].filter(Boolean).join("\n\n"),
+  };
+}
+
+// ─── TikTok via oEmbed ────────────────────────────────────────
+async function gatherTikTok(url) {
+  let title = "", author = "";
+  try {
+    const r = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      // TikTok's oEmbed "title" is actually the caption — the most useful field
+      title = j.title || "";
+      author = j.author_name || "";
+    }
+  } catch (e) {
+    console.log("TikTok oEmbed failed:", e.message);
+  }
+  return {
+    platform: "TikTok",
+    kind: "video",
+    title,
+    raw: [
+      author && `Creator: ${author}`,
+      title && `Caption: ${title}`,
+    ].filter(Boolean).join("\n\n"),
+  };
+}
+
+// ─── Instagram (best effort — meta tags only) ─────────────────
+async function gatherInstagram(url) {
+  let title = "", description = "";
+  try {
+    const html = await fetchHtml(url);
+    title = extractMeta(html, "og:title") || "";
+    description = extractMeta(html, "og:description") || "";
+  } catch (e) {
+    console.log("IG scrape failed:", e.message);
+  }
+  return {
+    platform: "Instagram",
+    kind: "video",
+    title,
+    raw: [
+      title && `Title: ${title}`,
+      description && `Caption: ${description}`,
+    ].filter(Boolean).join("\n\n"),
+  };
+}
+
+// ─── Generic web recipe (JSON-LD preferred, falls back to meta) ──
+async function gatherWebRecipe(url) {
+  const html = await fetchHtml(url);
+
+  // 1) Try JSON-LD schema.org/Recipe — the gold standard
+  const recipes = extractJsonLdRecipes(html);
+  if (recipes.length > 0) {
+    const r = recipes[0];
+    const ingredients = (Array.isArray(r.recipeIngredient) ? r.recipeIngredient : []).filter(Boolean);
+    const instructions = flattenInstructions(r.recipeInstructions);
+    const prepMin = parseIsoDuration(r.prepTime);
+    const cookMin = parseIsoDuration(r.cookTime);
+    const totalMin = parseIsoDuration(r.totalTime);
+    return {
+      platform: "Web",
+      kind: "recipe_page",
+      title: r.name || "",
+      raw: [
+        r.name && `Title: ${r.name}`,
+        r.description && `Description: ${r.description}`,
+        r.recipeCuisine && `Cuisine: ${r.recipeCuisine}`,
+        r.recipeYield && `Servings: ${r.recipeYield}`,
+        prepMin && `Prep: ${prepMin} min`,
+        cookMin && `Cook: ${cookMin} min`,
+        !cookMin && totalMin && `Total: ${totalMin} min`,
+        ingredients.length && `\nIngredients:\n${ingredients.join("\n")}`,
+        instructions && `\nInstructions:\n${instructions}`,
+      ].filter(Boolean).join("\n"),
+      _hints: {
+        prepTime: prepMin,
+        cookTime: cookMin,
+        servings: parseServings(r.recipeYield),
+        cuisine: typeof r.recipeCuisine === "string" ? r.recipeCuisine : null,
+      },
+    };
   }
 
-  // Step 2: Claude extracts structured recipe
-  const prompt = guruSuccess
-    ? `You are a recipe extraction AI. Here is text from a ${platform} recipe page extracted via cooking.guru:
+  // 2) Fallback: og meta tags + visible text excerpt
+  const title = extractMeta(html, "og:title") || extractTitle(html) || "";
+  const description = extractMeta(html, "og:description") || "";
+  const bodyText = stripToText(html).slice(0, 3000);
 
-"""
-${recipeText}
-"""
+  return {
+    platform: "Web",
+    kind: "web_page",
+    title,
+    raw: [
+      title && `Title: ${title}`,
+      description && `Description: ${description}`,
+      bodyText && `\nPage content:\n${bodyText}`,
+    ].filter(Boolean).join("\n"),
+  };
+}
 
-Extract the recipe and return ONLY valid JSON:
+// ─── HTML / metadata helpers ──────────────────────────────────
+async function fetchHtml(url) {
+  const r = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    signal: AbortSignal.timeout(15000),
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error(`Page fetch failed: ${r.status}`);
+  return await r.text();
+}
+
+function extractMeta(html, name) {
+  // Try property="..." then name="..."
+  const patterns = [
+    new RegExp(`<meta\\s+(?:[^>]*?\\s)?property=["']${escapeRegex(name)}["'][^>]*?content=["']([^"']*)["']`, "i"),
+    new RegExp(`<meta\\s+(?:[^>]*?\\s)?content=["']([^"']*)["'][^>]*?property=["']${escapeRegex(name)}["']`, "i"),
+    new RegExp(`<meta\\s+(?:[^>]*?\\s)?name=["']${escapeRegex(name)}["'][^>]*?content=["']([^"']*)["']`, "i"),
+    new RegExp(`<meta\\s+(?:[^>]*?\\s)?content=["']([^"']*)["'][^>]*?name=["']${escapeRegex(name)}["']`, "i"),
+  ];
+  for (const p of patterns) {
+    const m = p.exec(html);
+    if (m) return decodeEntities(m[1]);
+  }
+  return "";
+}
+
+function extractTitle(html) {
+  const m = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
+  return m ? decodeEntities(m[1].trim()) : "";
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&#x27;/g, "'").replace(/&apos;/g, "'");
+}
+
+function stripToText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[\s\S]*?<\/header>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .split("\n").map(s => s.trim()).filter(Boolean).join("\n")
+    .replace(/[ \t]+/g, " ");
+}
+
+// ─── JSON-LD recipe extraction ────────────────────────────────
+function extractJsonLdRecipes(html) {
+  const recipes = [];
+  const regex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(match[1].trim());
+      collectRecipes(data, recipes);
+    } catch (e) {
+      // Some sites embed multiple JSON objects or have HTML inside — try a relaxed parse
+      try {
+        const cleaned = match[1].trim().replace(/^﻿/, "");
+        const data = JSON.parse(cleaned);
+        collectRecipes(data, recipes);
+      } catch (e2) {
+        // skip silently
+      }
+    }
+  }
+  return recipes;
+}
+
+function collectRecipes(node, out) {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectRecipes(item, out);
+    return;
+  }
+  if (typeof node !== "object") return;
+  const type = node["@type"];
+  const isRecipe = type === "Recipe" || (Array.isArray(type) && type.includes("Recipe"));
+  if (isRecipe) out.push(node);
+  if (node["@graph"]) collectRecipes(node["@graph"], out);
+  if (node.mainEntity) collectRecipes(node.mainEntity, out);
+  if (node.itemListElement) collectRecipes(node.itemListElement, out);
+}
+
+function flattenInstructions(ri) {
+  if (!ri) return "";
+  if (typeof ri === "string") return ri;
+  if (Array.isArray(ri)) {
+    return ri.map((step, i) => {
+      if (typeof step === "string") return `${i + 1}. ${step}`;
+      if (step.text) return `${i + 1}. ${step.text}`;
+      if (step.name) return `${i + 1}. ${step.name}`;
+      if (step.itemListElement) return flattenInstructions(step.itemListElement);
+      return "";
+    }).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function parseIsoDuration(iso) {
+  if (!iso || typeof iso !== "string") return 0;
+  // PT15M, PT1H30M, PT2H, etc.
+  const m = /^P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/i.exec(iso);
+  if (!m) return 0;
+  const h = parseInt(m[1] || "0", 10);
+  const min = parseInt(m[2] || "0", 10);
+  return h * 60 + min;
+}
+
+function parseServings(y) {
+  if (!y) return null;
+  if (typeof y === "number") return y;
+  if (Array.isArray(y)) y = y[0];
+  if (typeof y !== "string") return null;
+  const m = /(\d+)/.exec(y);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// ─── Final Claude prompt builder ──────────────────────────────
+function buildExtractPrompt(gathered) {
+  const hints = gathered._hints || {};
+  const hintLine = [
+    hints.prepTime && `Prep time: ${hints.prepTime} min`,
+    hints.cookTime && `Cook time: ${hints.cookTime} min`,
+    hints.servings && `Servings: ${hints.servings}`,
+    hints.cuisine && `Cuisine: ${hints.cuisine}`,
+  ].filter(Boolean).join(", ");
+
+  return `You are a recipe extraction AI. Below is content gathered from a ${gathered.platform} ${gathered.kind === "recipe_page" ? "recipe page" : "video / page"}.
+
+${gathered.raw}
+
+${hintLine ? `Use these explicit hints if present: ${hintLine}.` : ""}
+
+Return ONLY valid JSON, no markdown, no explanation:
 {
   "title": "Recipe Title",
   "cuisine": "one of: Italian/Asian/Mexican/Mediterranean/Indian/Middle Eastern/American/French/Japanese/Thai/Greek/Spanish/Other",
@@ -135,51 +424,12 @@ ${CATEGORY_GUIDE}
 
 Rules:
 - ALL amounts must be metric (g, kg, ml, L). Countable items (eggs, cloves) stay as numbers.
-- Return 6-16 ingredients. No method in JSON.
-- If no clear recipe found, return {"error": "No recipe found in page content"}`
-
-    : `You are a recipe extraction AI. Could not fetch content from this ${platform} URL: ${url}
-
-Use any clues in the URL (title slug, channel, keywords) to infer the most likely recipe.
-
-Return ONLY valid JSON:
-{
-  "title": "Recipe Title",
-  "cuisine": "one of: Italian/Asian/Mexican/Mediterranean/Indian/Middle Eastern/American/French/Japanese/Thai/Greek/Spanish/Other",
-  "prepTime": 15,
-  "cookTime": 30,
-  "servings": 4,
-  "skillLevel": "Easy|Medium|Advanced",
-  "ingredients": [
-    {"item": "Chicken thighs", "amount": "600g", "category": "meat"}
-  ]
+- Return 6-25 ingredients.
+- Do NOT include method steps in the JSON.
+- If you genuinely cannot identify a recipe in the content above, return {"error": "Couldn't find a clear recipe in this content"}`;
 }
 
-${CATEGORY_GUIDE}
-
-Rules:
-- ALL amounts must be metric. Countable items stay as numbers.
-- Return 6-16 ingredients. No method.
-- If you truly cannot determine a recipe, return {"error": "Cannot determine recipe — please add it manually"}`;
-
-  try {
-    const data = await callClaude(prompt, ANTHROPIC_KEY);
-    return res.status(200).json({
-      ...data,
-      _source: guruSuccess ? "cooking.guru" : "url-inference",
-    });
-  } catch (err) {
-    console.error("Extract failed:", err.message, "| guruSuccess:", guruSuccess, "| textLen:", recipeText.length);
-    return res.status(500).json({
-      error: err.message,
-      _guruSuccess: guruSuccess,
-      _textLen: recipeText.length,
-      _textPreview: recipeText.slice(0, 800),
-    });
-  }
-}
-
-// ── Shared: call Claude API ───────────────────────────────────
+// ─── Shared: call Claude API ───────────────────────────────────
 async function callClaude(prompt, apiKey) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -190,7 +440,7 @@ async function callClaude(prompt, apiKey) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1200,
+      max_tokens: 1500,
       messages: [{ role: "user", content: prompt }],
     }),
   });
