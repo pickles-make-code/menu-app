@@ -186,10 +186,11 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
       prepTime: recipe.prepTime,
       cookTime: recipe.cookTime,
       ingredients: recipe.ingredients.map((i) => ({ ...i })),
-      // Raw text for the textarea — only parsed on save so typing/Enter behave normally
+      // Raw text for the textareas — only parsed on save so typing/Enter behave normally
       ingredientsText: recipe.ingredients
         .map((i) => `${i.amount} ${i.item}, ${i.category}`)
         .join("\n"),
+      methodText: (recipe.method || []).join("\n"),
     });
     setEditing(true);
   }
@@ -207,8 +208,12 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
         const item = parts.slice(1).join(" ");
         return { amount: amount.trim(), item: item.trim(), category: (cat || "dry").trim() };
       });
-    const { ingredientsText, ...rest } = editData;
-    onEdit({ ...recipe, ...rest, ingredients: parsedIngredients });
+    const parsedMethod = (editData.methodText || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const { ingredientsText, methodText, ...rest } = editData;
+    onEdit({ ...recipe, ...rest, ingredients: parsedIngredients, method: parsedMethod });
     setEditing(false);
     setEditData(null);
   }
@@ -305,6 +310,13 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
             style={{ ...inputStyle, width: "100%", padding: "10px", minHeight: 120, resize: "vertical", fontSize: 12, lineHeight: 1.7 }}
             value={editData.ingredientsText}
             onChange={(e) => setEditData({ ...editData, ingredientsText: e.target.value })}
+          />
+          <div style={{ ...labelStyle, marginTop: 12 }}>Method <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(one step per line, optional)</span></div>
+          <textarea
+            style={{ ...inputStyle, width: "100%", padding: "10px", minHeight: 120, resize: "vertical", fontSize: 12, lineHeight: 1.7 }}
+            value={editData.methodText}
+            onChange={(e) => setEditData({ ...editData, methodText: e.target.value })}
+            placeholder={"Season chicken and marinate for 30 mins\nHeat oil in pan over high heat\nCook chicken 5 mins each side..."}
           />
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff", flex: 1 }} onClick={saveEdit}>Save changes</button>
