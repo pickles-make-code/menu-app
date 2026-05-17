@@ -370,6 +370,12 @@ function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
   const [isOver, setIsOver] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
+  // Reset dragging state whenever the recipe in this day changes
+  // (handles the case where the source element re-renders mid-drag and onDragEnd doesn't fire)
+  useEffect(() => {
+    setIsDragging(false);
+  }, [recipe?.id]);
+
   function handleDragOver(e) {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -395,8 +401,7 @@ function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
         borderRadius: "var(--radius)",
         border: `1.5px ${isOver ? "dashed var(--accent)" : `solid ${recipe ? "var(--border2)" : "var(--border)"}`}`,
         overflow: "hidden",
-        opacity: isDragging ? 0.4 : 1,
-        transition: "border-color 0.15s, background 0.15s, opacity 0.15s",
+        transition: "border-color 0.15s, background 0.15s",
       }}>
       <div style={{
         padding: "10px 16px",
@@ -421,7 +426,13 @@ function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
             setIsDragging(true);
           }}
           onDragEnd={() => setIsDragging(false)}
-          style={{ padding: "14px 16px", cursor: "grab", userSelect: "none" }}
+          style={{
+            padding: "14px 16px",
+            cursor: "grab",
+            userSelect: "none",
+            opacity: isDragging ? 0.4 : 1,
+            transition: "opacity 0.15s",
+          }}
           title="Drag to swap with another day"
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
