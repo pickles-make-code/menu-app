@@ -623,7 +623,7 @@ function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClos
 // Day card for Menu tab
 // Drag is driven by Pointer Events at the App level so it works on mouse + touch.
 // `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
-function DayCard({ day, recipe, onAdd, onRemove, onView, onDragStart, isDragging, isTarget }) {
+function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, isDragging, isTarget }) {
   return (
     <div
       data-day={day}
