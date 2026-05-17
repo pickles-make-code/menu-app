@@ -37,6 +37,8 @@ function titleCase(s) {
 }
 
 // Convert British/American food terms to Australian English.
+// Also normalise butter variants — assume "salted/unsalted/regular" are all just "butter"
+// (matters because we typically only stock regular butter, and the AI often writes "unsalted").
 const AUS_TERM_REPLACEMENTS = [
   [/\bcourgettes\b/gi, "Zucchinis"],
   [/\bcourgette\b/gi, "Zucchini"],
@@ -59,7 +61,9 @@ const AUS_TERM_REPLACEMENTS = [
   [/\bgarbanzo beans\b/gi, "Chickpeas"],
   [/\bgarbanzo\b/gi, "Chickpea"],
   [/\bcheesecloth\b/gi, "Muslin"],
-  [/\beggplant\b/gi, "Eggplant"],
+  // Butter — collapse "unsalted/salted butter" to plain "butter" so shopping list combines them
+  [/\bunsalted butter\b/gi, "Butter"],
+  [/\bsalted butter\b/gi, "Butter"],
 ];
 
 function australianise(s) {
@@ -75,22 +79,31 @@ function cleanText(s) {
 }
 
 // Pantry staples never go on the shopping list — you always have them.
-const PANTRY_STAPLES = [
-  /^water$/i,
-  /^salt$/i,
-  /^(?:flaky?|sea|kosher|table|rock)\s+salt$/i,
-  /^salt\s+(?:and|&)\s+pepper$/i,
-  /^pepper$/i,
-  /^(?:black|white|ground|cracked)\s*pepper$/i,
-  /^(?:olive|cooking|vegetable|sunflower|canola|rapeseed)\s+oil$/i,
-  /^extra[\s-]?virgin\s+olive\s+oil$/i,
-  /^(?:cooking\s+)?spray$/i,
-];
-
 function isPantryStaple(item) {
   if (!item) return false;
-  const s = item.trim();
-  return PANTRY_STAPLES.some((re) => re.test(s));
+  // Use the comma-stripped form so "Black Pepper, freshly ground" still matches "Black Pepper"
+  const s = item.split(",")[0].trim().toLowerCase();
+  if (!s) return false;
+
+  // Any pepper variant — but NOT bell/chilli/cayenne/jalapeno/capsicum
+  if (/(?:^|\s)pepper$/.test(s)) {
+    return !/\b(bell|chilli|chili|cayenne|paprika|capsicum|jalapen|sichuan|szechuan|long|pink|green peppercorn)\b/.test(s);
+  }
+  // Pepper with "freshly cracked/ground" prefix doesn't end in "pepper" sometimes; catch it
+  if (/^(?:freshly\s+(?:cracked|ground)\s+)?(?:black|white|ground|cracked)\s*pepper/.test(s)) return true;
+
+  // Salt variants
+  if (s === "salt" || /\bsalt$/.test(s)) return true;
+
+  // Water
+  if (s === "water") return true;
+
+  // Cooking oils (basic ones — not specialty oils like sesame, walnut, truffle)
+  if (/^(?:olive|cooking|vegetable|sunflower|canola|rapeseed)\s+oil$/.test(s)) return true;
+  if (/^extra[\s-]?virgin\s+olive\s+oil$/.test(s)) return true;
+  if (/^(?:cooking\s+)?spray$/.test(s)) return true;
+
+  return false;
 }
 
 // Eggs belong in deli, not dairy. Fix legacy data on the fly.
@@ -99,6 +112,21 @@ function correctCategory(item, category) {
   const i = item.toLowerCase().trim();
   if (/(?:^|\s)eggs?$/.test(i) && (category === "dairy" || !category)) return "deli";
   return category || "dry";
+}
+
+// For the shopping list, the same ingredient prepared differently should combine.
+// E.g. "Fresh Ginger, sliced", "Fresh Ginger, julienned" → one "Ginger" entry.
+// Strips parentheticals, anything after the first comma, and a few common prefixes.
+function normaliseIngredientForGrouping(item) {
+  if (!item) return "";
+  let s = String(item)
+    .split(",")[0]                       // drop ", sliced" etc.
+    .replace(/\s*\([^)]*\)\s*/g, " ")    // drop "(scallions)" etc.
+    .replace(/\s+/g, " ")
+    .trim();
+  // Strip leading qualifiers that describe state, not the ingredient itself
+  s = s.replace(/^(fresh|raw|whole|finely|coarsely|roughly|large|small|medium)\s+/i, "");
+  return s.trim();
 }
 
 // Normalize a recipe object: apply Aus English + title case to title and ingredient items.
@@ -572,6 +600,33 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
   );
 }
 
+// Compact "+ Add item" input row used under each grocery category
+function AddItemInput({ placeholder, onAdd }) {
+  const [val, setVal] = useState("");
+  function submit() {
+    const v = val.trim();
+    if (!v) return;
+    onAdd(v);
+    setVal("");
+  }
+  return (
+    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+      <input
+        style={{ ...inputStyle, flex: 1, padding: "7px 10px", fontSize: 13 }}
+        placeholder={placeholder}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <button
+        style={{ ...btnStyle, background: val.trim() ? "var(--accent)" : "var(--bg4)", color: val.trim() ? "#fff" : "var(--text3)", padding: "7px 14px", fontSize: 12 }}
+        onClick={submit}
+        disabled={!val.trim()}
+      >+ Add</button>
+    </div>
+  );
+}
+
 // Reusable section for the bottom of the List tab — Cleaning or Pharmacy
 function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
   const [input, setInput] = useState("");
@@ -926,10 +981,13 @@ function buildShoppingList(items) {
   for (const { recipe, mult } of items) {
     const m = mult || 1;
     for (const ing of (recipe.ingredients || [])) {
-      const displayItem = cleanText(ing.item);
-      // Skip pantry staples — user always has them
-      if (isPantryStaple(displayItem)) continue;
-      const key = displayItem.toLowerCase().trim();
+      const rawItem = cleanText(ing.item);
+      // Skip pantry staples (water, salt, pepper, basic oils)
+      if (isPantryStaple(rawItem)) continue;
+      // Grouping key strips prep descriptors so different preparations combine into one entry
+      const displayItem = cleanText(normaliseIngredientForGrouping(rawItem));
+      if (!displayItem) continue;
+      const key = displayItem.toLowerCase();
       const cat = correctCategory(displayItem, ing.category);
       if (!combined[key]) {
         combined[key] = { item: displayItem, category: cat, entries: [] };
@@ -1558,12 +1616,40 @@ export default function App() {
       .filter(Boolean)
       .map((entry) => ({ recipe: lib.find((r) => r.id === entry.id), mult: entry.mult || 1 }))
       .filter((x) => x.recipe);
-    const list = buildShoppingList(items).map((item) => {
-      const existing = shoppingList.find((i) => i.item.toLowerCase() === item.item.toLowerCase());
+    const auto = buildShoppingList(items).map((item) => {
+      const existing = shoppingList.find((i) => !i.manual && i.item.toLowerCase() === item.item.toLowerCase());
       return { ...item, checked: existing?.checked || false };
     });
+    // Preserve manually-added items (the ones added via the + button on a category)
+    const manual = shoppingList.filter((i) => i.manual);
+    const list = [...auto, ...manual];
     setShoppingList(list);
     saveList(list);
+  }
+
+  // Add a manual item to a specific grocery category (not from any recipe)
+  async function addManualGroceryItem(category, text) {
+    const cleaned = cleanText(text);
+    if (!cleaned) return;
+    // Don't duplicate if it already exists in that category
+    if (shoppingList.some((i) => i.category === category && i.item.toLowerCase() === cleaned.toLowerCase())) return;
+    const item = {
+      item: cleaned,
+      category,
+      combinedAmount: "",
+      entries: [],
+      checked: false,
+      manual: true,
+    };
+    const updated = [...shoppingList, item];
+    setShoppingList(updated);
+    await saveList(updated);
+  }
+
+  async function removeManualGroceryItem(itemKey) {
+    const updated = shoppingList.filter((i) => !(i.manual && i.item === itemKey));
+    setShoppingList(updated);
+    await saveList(updated);
   }
 
   async function toggleListItem(idx) {
@@ -1937,36 +2023,29 @@ export default function App() {
                 )}
               </div>
 
-              {shoppingList.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "60px 20px" }}>
-                  <div style={{ fontSize: 48, marginBottom: 16 }}>🛒</div>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, marginBottom: 8 }}>List is empty</div>
-                  <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, maxWidth: 280, margin: "0 auto 20px" }}>
-                    Plan your week on the Menu tab, then build your shopping list.
-                  </div>
-                  <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff" }} onClick={() => setTab("menu")}>Go to Menu →</button>
-                </div>
-              ) : (
-                GROCERY_CATS.map((cat) => {
-                  const catItems = shoppingList.filter((i) => i.category === cat.id);
-                  if (catItems.length === 0) return null;
-                  return (
-                    <div key={cat.id} style={{ marginBottom: 24 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                        <span style={{ fontSize: 16 }}>{cat.icon}</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "1px" }}>{cat.label}</span>
-                        <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+              {/* Always render all 6 grocery categories, even when empty, so you can add items manually */}
+              {GROCERY_CATS.map((cat) => {
+                const catItems = shoppingList.filter((i) => i.category === cat.id);
+                return (
+                  <div key={cat.id} style={{ marginBottom: 24 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                      <span style={{ fontSize: 16 }}>{cat.icon}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "1px" }}>{cat.label}</span>
+                      <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                      {catItems.length > 0 && (
                         <span style={{ fontSize: 11, color: "var(--text3)" }}>
                           {catItems.filter((i) => i.checked).length}/{catItems.length}
                         </span>
-                      </div>
+                      )}
+                    </div>
+                    {catItems.length > 0 && (
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        {catItems.map((item, idx) => {
+                        {catItems.map((item) => {
                           const globalIdx = shoppingList.findIndex((i) => i === item);
                           const isExpanded = expandedItems[item.item];
                           const hasBreakdown = item.entries?.length > 1;
                           return (
-                            <div key={item.item} style={{
+                            <div key={`${item.item}-${item.manual ? "m" : "a"}`} style={{
                               background: "var(--bg2)", borderRadius: "var(--radius3)",
                               border: `1.5px solid ${item.checked ? "var(--border)" : "var(--border2)"}`,
                               overflow: "hidden", transition: "border-color 0.2s",
@@ -1984,20 +2063,29 @@ export default function App() {
                                 }}>
                                   {item.checked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
                                 </div>
-                                <span style={{
-                                  fontSize: 13, fontWeight: 600,
-                                  color: item.checked ? "var(--text3)" : "var(--accent2)",
-                                  minWidth: 70, flexShrink: 0,
-                                  textDecoration: item.checked ? "line-through" : "none",
-                                }}>
-                                  {item.combinedAmount}
-                                </span>
+                                {item.combinedAmount && (
+                                  <span style={{
+                                    fontSize: 13, fontWeight: 600,
+                                    color: item.checked ? "var(--text3)" : "var(--accent2)",
+                                    minWidth: 70, flexShrink: 0,
+                                    textDecoration: item.checked ? "line-through" : "none",
+                                  }}>
+                                    {item.combinedAmount}
+                                  </span>
+                                )}
                                 <span style={{
                                   flex: 1, fontSize: 14,
                                   color: item.checked ? "var(--text3)" : "var(--text)",
                                   textDecoration: item.checked ? "line-through" : "none",
                                   transition: "all 0.15s",
                                 }}>{item.item}</span>
+                                {item.manual && (
+                                  <button
+                                    style={{ background: "none", fontSize: 14, color: "var(--text3)", padding: 2 }}
+                                    onClick={(e) => { e.stopPropagation(); removeManualGroceryItem(item.item); }}
+                                    title="Remove"
+                                  >🗑</button>
+                                )}
                                 {hasBreakdown && (
                                   <button
                                     style={{ background: "none", fontSize: 11, color: "var(--text3)", padding: "2px 6px", borderRadius: 4, border: "1px solid var(--border)" }}
@@ -2021,10 +2109,14 @@ export default function App() {
                           );
                         })}
                       </div>
-                    </div>
-                  );
-                })
-              )}
+                    )}
+                    <AddItemInput
+                      placeholder={`Add ${cat.label.toLowerCase()} item...`}
+                      onAdd={(text) => addManualGroceryItem(cat.id, text)}
+                    />
+                  </div>
+                );
+              })}
 
               {/* Fixed extra sections — always visible, persist independently of weekly menu */}
               <ExtraSection
