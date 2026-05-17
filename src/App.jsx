@@ -71,15 +71,95 @@ async function generateCustomRecipe(details) {
   return data;
 }
 
-// ─── Storage (localStorage — works on any browser/device) ────
-async function sget(key) {
-  try {
-    const val = localStorage.getItem(key);
-    return val ? JSON.parse(val) : null;
-  } catch { return null; }
+// ─── Storage (Upstash Redis via /api/store, keyed by household code) ────
+// Data syncs across devices: any device using the same household code sees the same data.
+const HOUSEHOLD_LS_KEY = "menu_household_code";
+
+const _state = {
+  cache: { library: null, week: null, list: null },
+  code: null,
+  loaded: false,
+  saveTimer: null,
+};
+
+const FIELD_FOR_KEY = {
+  menu_library_v2: "library",
+  menu_week_v2: "week",
+  menu_list_v2: "list",
+};
+
+async function loadHousehold(code) {
+  const res = await fetch(`/api/store?code=${encodeURIComponent(code)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to load household");
+  }
+  const data = await res.json();
+  _state.cache = {
+    library: Array.isArray(data.library) ? data.library : [],
+    week: data.week && typeof data.week === "object" ? data.week : {},
+    list: Array.isArray(data.list) ? data.list : [],
+  };
+  _state.code = code;
+  _state.loaded = true;
+  try { localStorage.setItem(HOUSEHOLD_LS_KEY, code); } catch {}
 }
+
+async function sget(key) {
+  if (!_state.loaded) return null;
+  return _state.cache[FIELD_FOR_KEY[key]];
+}
+
 async function sset(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  if (!_state.code) return;
+  _state.cache[FIELD_FOR_KEY[key]] = val;
+  // Debounce — many quick state updates collapse into one network save
+  clearTimeout(_state.saveTimer);
+  _state.saveTimer = setTimeout(saveHousehold, 600);
+}
+
+async function saveHousehold() {
+  if (!_state.code) return;
+  try {
+    await fetch("/api/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: _state.code, ..._state.cache }),
+    });
+  } catch (e) {
+    console.error("Household save failed:", e);
+  }
+}
+
+function getStoredHouseholdCode() {
+  try { return localStorage.getItem(HOUSEHOLD_LS_KEY); } catch { return null; }
+}
+
+function clearStoredHouseholdCode() {
+  try { localStorage.removeItem(HOUSEHOLD_LS_KEY); } catch {}
+  _state.code = null;
+  _state.loaded = false;
+  _state.cache = { library: null, week: null, list: null };
+}
+
+// Read leftover data from the pre-sync localStorage version, so users can migrate.
+function readLegacyLocalData() {
+  try {
+    const lib = JSON.parse(localStorage.getItem("menu_library_v2") || "null");
+    const wk = JSON.parse(localStorage.getItem("menu_week_v2") || "null");
+    const sl = JSON.parse(localStorage.getItem("menu_list_v2") || "null");
+    if ((lib && lib.length) || (wk && Object.keys(wk).length) || (sl && sl.length)) {
+      return { library: lib || [], week: wk || {}, list: sl || [] };
+    }
+  } catch {}
+  return null;
+}
+
+function generateHouseholdCode() {
+  const alphabet = "abcdefghijkmnpqrstuvwxyz23456789"; // skip confusable chars
+  let out = "";
+  for (let i = 0; i < 10; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
 }
 
 // ─── CSS Variables injected globally ─────────────────────────
@@ -750,6 +830,130 @@ function ImportPage({ library, onImported, showBanner }) {
   );
 }
 
+// ─── Household setup screen (shown on first launch, or after clearing the code) ──
+function SetupScreen({ onSetup, hasLegacyData }) {
+  const [mode, setMode] = useState("join"); // "join" | "create"
+  const [code, setCode] = useState("");
+  const [generated, setGenerated] = useState(generateHouseholdCode);
+  const [importLegacy, setImportLegacy] = useState(true);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit() {
+    setError("");
+    const chosen = (mode === "join" ? code : generated).trim().toLowerCase();
+    if (!/^[a-z0-9_-]{4,64}$/.test(chosen)) {
+      setError("Code must be 4-64 letters, numbers, dashes or underscores.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await onSetup(chosen, mode === "create" && hasLegacyData && importLegacy);
+    } catch (e) {
+      setError(e.message || "Could not set up household.");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <>
+      <style>{THEME}</style>
+      <div style={{
+        minHeight: "100vh", background: "var(--bg)", color: "var(--text)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+      }}>
+        <div style={{
+          background: "var(--bg2)", borderRadius: "var(--radius)",
+          border: "1.5px solid var(--border)",
+          padding: 28, maxWidth: 420, width: "100%", boxShadow: "var(--shadow)",
+        }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 700, marginBottom: 6 }}>
+            Menu<span style={{ color: "var(--accent)" }}>.</span>
+          </div>
+          <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 22, lineHeight: 1.55 }}>
+            A household code keeps your menu, library and shopping list in sync across every device that uses the same code.
+          </div>
+
+          <div style={{ display: "flex", background: "var(--bg3)", borderRadius: "var(--radius2)", padding: 4, marginBottom: 18, gap: 4 }}>
+            {[["join", "Join household"], ["create", "Create new"]].map(([id, label]) => (
+              <button key={id} style={{
+                flex: 1, padding: "9px", borderRadius: "var(--radius3)",
+                fontSize: 13, fontWeight: 600,
+                background: mode === id ? "var(--accent)" : "transparent",
+                color: mode === id ? "#fff" : "var(--text2)",
+                transition: "all 0.2s",
+              }} onClick={() => { setMode(id); setError(""); }}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {mode === "join" ? (
+            <div>
+              <div style={labelStyle}>Household code</div>
+              <input
+                style={{ ...inputStyle }}
+                placeholder="e.g. maddocks-kitchen"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !loading && submit()}
+                autoFocus
+              />
+              <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 8, lineHeight: 1.6 }}>
+                Enter the same code your partner used. 4-64 characters: letters, numbers, dashes or underscores.
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={labelStyle}>Your new household code</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  style={{ ...inputStyle, fontFamily: "monospace", letterSpacing: "0.5px", flex: 1 }}
+                  value={generated}
+                  onChange={(e) => setGenerated(e.target.value)}
+                />
+                <button
+                  style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text2)" }}
+                  onClick={() => setGenerated(generateHouseholdCode())}
+                  type="button"
+                >↻</button>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 8, lineHeight: 1.6 }}>
+                Share this code with anyone you want to plan meals with — they enter it on their device to join.
+              </div>
+              {hasLegacyData && (
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 14, fontSize: 13, color: "var(--text2)", cursor: "pointer" }}>
+                  <input type="checkbox" checked={importLegacy} onChange={(e) => setImportLegacy(e.target.checked)} style={{ marginTop: 2 }} />
+                  <span>Import existing recipes from this device into the new household.</span>
+                </label>
+              )}
+            </div>
+          )}
+
+          {error && (
+            <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 12px", background: "var(--redbg)", borderRadius: "var(--radius3)", marginTop: 14 }}>
+              {error}
+            </div>
+          )}
+
+          <button
+            style={{
+              ...btnStyle,
+              background: loading ? "var(--bg4)" : "var(--accent)",
+              color: loading ? "var(--text3)" : "#fff",
+              width: "100%", marginTop: 18, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}
+            onClick={submit}
+            disabled={loading}
+          >
+            {loading ? <><Spinner size={15} /> Setting up...</> : mode === "join" ? "Join →" : "Create household →"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("menu");
@@ -774,19 +978,57 @@ export default function App() {
   const [dragSource, setDragSource] = useState(null); // day currently being dragged
   const [dragTarget, setDragTarget] = useState(null); // day pointer is currently over
 
+  // Household sync state
+  const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
+  const [loadError, setLoadError] = useState("");
+  const legacyData = useRef(null);
+  if (legacyData.current === null) legacyData.current = readLegacyLocalData();
+
+  // Setup handler — joins or creates a household, then loads its state
+  async function handleSetup(code, importLegacy) {
+    await loadHousehold(code);
+    if (importLegacy && legacyData.current) {
+      // Seed the new household with this device's existing recipes
+      const { library: ll, week: lw, list: ls } = legacyData.current;
+      if (ll && ll.length) _state.cache.library = ll;
+      if (lw && Object.keys(lw).length) _state.cache.week = lw;
+      if (ls && ls.length) _state.cache.list = ls;
+      await saveHousehold();
+    }
+    setHouseholdCode(code);
+  }
+
+  function handleSignOut() {
+    clearStoredHouseholdCode();
+    setHouseholdCode(null);
+    setLibrary([]);
+    setWeek(Object.fromEntries(DAYS.map((d) => [d, null])));
+    setShoppingList([]);
+    setStorageReady(false);
+  }
+
   // ── Persistence ──
   useEffect(() => {
+    if (!householdCode) return;
+    let cancelled = false;
     async function load() {
-      const lib = await sget(SK.library);
-      const wk = await sget(SK.menu);
-      const sl = await sget(SK.list);
-      if (lib) setLibrary(lib);
-      if (wk) setWeek(wk);
-      if (sl) setShoppingList(sl);
-      setStorageReady(true);
+      try {
+        await loadHousehold(householdCode);
+        if (cancelled) return;
+        const lib = await sget(SK.library);
+        const wk = await sget(SK.menu);
+        const sl = await sget(SK.list);
+        if (lib) setLibrary(lib);
+        if (wk && Object.keys(wk).length) setWeek(wk);
+        if (sl) setShoppingList(sl);
+      } catch (e) {
+        setLoadError(e.message || "Failed to load household data.");
+      }
+      if (!cancelled) setStorageReady(true);
     }
     load();
-  }, []);
+    return () => { cancelled = true; };
+  }, [householdCode]);
 
   const saveLibrary = useCallback(async (lib) => { await sset(SK.library, lib); }, []);
   const saveWeek = useCallback(async (wk) => { await sset(SK.menu, wk); }, []);
@@ -945,6 +1187,11 @@ export default function App() {
     { id: "import", label: "Import", icon: "＋" },
   ];
 
+  // No household code yet — show the setup screen
+  if (!householdCode) {
+    return <SetupScreen onSetup={handleSetup} hasLegacyData={!!legacyData.current} />;
+  }
+
   return (
     <>
       <style>{THEME}</style>
@@ -961,11 +1208,38 @@ export default function App() {
               <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.5px" }}>
                 Menu<span style={{ color: "var(--accent)" }}>.</span>
               </div>
-              {tab === "list" && shoppingList.length > 0 && (
-                <div style={{ fontSize: 12, color: "var(--text2)", fontWeight: 500 }}>
-                  <span style={{ color: "var(--accent)", fontWeight: 700 }}>{checkedCount}</span>/{shoppingList.length} items
-                </div>
-              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {tab === "list" && shoppingList.length > 0 && (
+                  <div style={{ fontSize: 12, color: "var(--text2)", fontWeight: 500 }}>
+                    <span style={{ color: "var(--accent)", fontWeight: 700 }}>{checkedCount}</span>/{shoppingList.length} items
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    if (confirm(`You're synced as "${householdCode}". Switch household? Your data stays saved on the server and you can rejoin later.`)) {
+                      handleSignOut();
+                    }
+                  }}
+                  title={`Household: ${householdCode}`}
+                  style={{
+                    background: "var(--bg3)",
+                    color: "var(--text2)",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    padding: "4px 9px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    fontFamily: "monospace",
+                    letterSpacing: "0.3px",
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  ⌂ {householdCode}
+                </button>
+              </div>
             </div>
             {/* Tab bar */}
             <div style={{ display: "flex", marginTop: 10 }}>
