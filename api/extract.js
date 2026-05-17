@@ -524,6 +524,11 @@ Return ONLY valid JSON, no markdown, no explanation:
   "skillLevel": "Easy|Medium|Advanced",
   "ingredients": [
     {"item": "Chicken thighs", "amount": "600g", "category": "meat"}
+  ],
+  "method": [
+    "Season the chicken thighs with salt and pepper.",
+    "Heat oil in a pan over medium-high heat.",
+    "Cook the chicken 5 minutes each side until golden."
   ]
 }
 
@@ -532,7 +537,7 @@ ${CATEGORY_GUIDE}
 Rules:
 - ALL amounts must be metric (g, kg, ml, L). Countable items (eggs, cloves) stay as numbers.
 - Return 6-25 ingredients.
-- Do NOT include method steps in the JSON.
+- "method" is an array of clear, concise step strings. Use the instructions from the source content if present. If none are available, return an empty array [].
 - If you genuinely cannot identify a recipe in the content above, return {"error": "Couldn't find a clear recipe in this content"}`;
 }
 

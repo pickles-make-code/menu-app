@@ -466,10 +466,138 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
   );
 }
 
+// Full-screen recipe viewer modal — opened by tapping a day's recipe on the Menu tab
+function RecipeViewer({ recipe, day, onClose }) {
+  const [servMult, setServMult] = useState(1);
+  if (!recipe) return null;
+  const totalTime = (recipe.prepTime || 0) + (recipe.cookTime || 0);
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 310,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "var(--bg2)", borderRadius: "var(--radius)",
+          width: "100%", maxWidth: 520, maxHeight: "90vh",
+          overflow: "auto", boxShadow: "var(--shadow)",
+          display: "flex", flexDirection: "column",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div style={{
+          padding: "16px 18px 12px",
+          position: "sticky", top: 0,
+          background: "var(--bg2)",
+          borderBottom: "1px solid var(--border)",
+          zIndex: 1,
+        }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {day && (
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", letterSpacing: "0.8px", textTransform: "uppercase", marginBottom: 4 }}>
+                  {day}
+                </div>
+              )}
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                {recipe.favourite && <span style={{ fontSize: 16, marginRight: 6 }}>⭐</span>}
+                {recipe.title}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
+                {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
+                {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              style={{ background: "var(--bg4)", color: "var(--text2)", borderRadius: 6, padding: "4px 10px", fontSize: 16, fontWeight: 600, flexShrink: 0 }}
+              title="Close"
+            >✕</button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "14px 18px 20px" }}>
+          {/* Servings */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <span style={{ fontSize: 12, color: "var(--text2)" }}>
+              Servings: <span style={{ color: "var(--text)" }}>{(recipe.servings || 4) * servMult}</span>
+            </span>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[1, 2, 3, 4].map((m) => (
+                <button
+                  key={m}
+                  style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                    background: servMult === m ? "var(--accent)" : "var(--bg4)",
+                    color: servMult === m ? "#fff" : "var(--text2)",
+                  }}
+                  onClick={() => setServMult(m)}
+                >×{m}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Ingredients */}
+          {recipe.ingredients?.length > 0 && (
+            <div style={{ marginBottom: 18 }}>
+              <div style={labelStyle}>Ingredients</div>
+              {recipe.ingredients.map((ing, i) => {
+                const amt = multiplyAmount(ing.amount, servMult);
+                return (
+                  <div key={i} style={{ display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 14 }}>
+                    <span style={{ color: "var(--accent2)", fontWeight: 500, minWidth: 80, flexShrink: 0 }}>{amt}</span>
+                    <span style={{ color: "var(--text2)" }}>{ing.item}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Method */}
+          {recipe.method?.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <div style={labelStyle}>Method</div>
+              {recipe.method.map((step, i) => (
+                <div key={i} style={{ display: "flex", gap: 12, padding: "7px 0", fontSize: 14 }}>
+                  <span style={{ color: "var(--accent)", fontWeight: 700, flexShrink: 0, width: 22 }}>{i + 1}.</span>
+                  <span style={{ color: "var(--text2)", lineHeight: 1.55 }}>{step}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Source link */}
+          {recipe.sourceUrl && (
+            <a
+              href={recipe.sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: "inline-block", marginTop: 6,
+                fontSize: 12, color: "var(--accent2)",
+                textDecoration: "none", borderBottom: "1px solid var(--accent2)",
+              }}
+            >
+              {platformIcon(recipe.platform)} View original on {platformLabel(recipe.platform)}
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Day card for Menu tab
 // Drag is driven by Pointer Events at the App level so it works on mouse + touch.
 // `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
-function DayCard({ day, recipe, onAdd, onRemove, onDragStart, isDragging, isTarget }) {
+function DayCard({ day, recipe, onAdd, onRemove, onView, onDragStart, isDragging, isTarget }) {
   return (
     <div
       data-day={day}
@@ -490,7 +618,10 @@ function DayCard({ day, recipe, onAdd, onRemove, onDragStart, isDragging, isTarg
           {day}
         </span>
         {recipe && (
-          <button style={{ background: "none", fontSize: 13, color: "var(--text3)", padding: 2 }} onClick={() => onRemove(day)}>✕</button>
+          <button
+            style={{ background: "none", fontSize: 13, color: "var(--text3)", padding: 2 }}
+            onClick={(e) => { e.stopPropagation(); onRemove(day); }}
+          >✕</button>
         )}
       </div>
 
@@ -512,8 +643,10 @@ function DayCard({ day, recipe, onAdd, onRemove, onDragStart, isDragging, isTarg
               // Skip secondary mouse buttons (right-click etc.)
               if (e.pointerType === "mouse" && e.button !== 0) return;
               e.preventDefault();
+              e.stopPropagation();
               onDragStart(day, e.clientX, e.clientY);
             }}
+            onClick={(e) => e.stopPropagation()}
             style={{
               color: "var(--text3)",
               fontSize: 16,
@@ -529,7 +662,11 @@ function DayCard({ day, recipe, onAdd, onRemove, onDragStart, isDragging, isTarg
           >
             ⋮⋮
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+            onClick={() => onView && onView(day)}
+            title="Tap to view full recipe"
+          >
             <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
               {recipe.title}
             </div>
@@ -663,6 +800,7 @@ function ImportPage({ library, onImported, showBanner }) {
         servings: data.servings || 4,
         skillLevel: data.skillLevel || "Medium",
         ingredients: data.ingredients || [],
+        method: Array.isArray(data.method) ? data.method : [],
         favourite: false,
         menuCount: 0,
         addedAt: Date.now(),
@@ -978,6 +1116,9 @@ export default function App() {
   // Menu drag-and-drop state (works on mouse + touch via Pointer Events)
   const [dragSource, setDragSource] = useState(null); // day currently being dragged
   const [dragTarget, setDragTarget] = useState(null); // day pointer is currently over
+
+  // Menu: tap-to-view recipe modal
+  const [viewingDay, setViewingDay] = useState(null);
 
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
@@ -1307,6 +1448,15 @@ export default function App() {
           </div>
         )}
 
+        {/* Recipe viewer modal — tap a day's card on the Menu tab to open */}
+        {viewingDay && week[viewingDay] && (
+          <RecipeViewer
+            recipe={recipeById(week[viewingDay])}
+            day={viewingDay}
+            onClose={() => setViewingDay(null)}
+          />
+        )}
+
         {/* Recipe picker modal (for menu day add) */}
         {pickerDay && pickerDay !== "__new__" && (
           <div style={{
@@ -1381,6 +1531,7 @@ export default function App() {
                     recipe={week[day] ? recipeById(week[day]) : null}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
+                    onView={(d) => setViewingDay(d)}
                     onDragStart={startDayDrag}
                     isDragging={dragSource === day}
                     isTarget={dragTarget === day && dragSource !== day}
