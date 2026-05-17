@@ -186,12 +186,29 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
       prepTime: recipe.prepTime,
       cookTime: recipe.cookTime,
       ingredients: recipe.ingredients.map((i) => ({ ...i })),
+      // Raw text for the textarea — only parsed on save so typing/Enter behave normally
+      ingredientsText: recipe.ingredients
+        .map((i) => `${i.amount} ${i.item}, ${i.category}`)
+        .join("\n"),
     });
     setEditing(true);
   }
 
   function saveEdit() {
-    onEdit({ ...recipe, ...editData });
+    // Parse the ingredients textarea on save (not on every keystroke)
+    const parsedIngredients = (editData.ingredientsText || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [main, cat] = line.split(",");
+        const parts = (main || "").trim().split(/\s+/);
+        const amount = parts[0] || "";
+        const item = parts.slice(1).join(" ");
+        return { amount: amount.trim(), item: item.trim(), category: (cat || "dry").trim() };
+      });
+    const { ingredientsText, ...rest } = editData;
+    onEdit({ ...recipe, ...rest, ingredients: parsedIngredients });
     setEditing(false);
     setEditData(null);
   }
@@ -286,17 +303,8 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
           <div style={labelStyle}>Ingredients (one per line: "amount item, category")</div>
           <textarea
             style={{ ...inputStyle, width: "100%", padding: "10px", minHeight: 120, resize: "vertical", fontSize: 12, lineHeight: 1.7 }}
-            value={editData.ingredients.map((i) => `${i.amount} ${i.item}, ${i.category}`).join("\n")}
-            onChange={(e) => {
-              const parsed = e.target.value.split("\n").filter(Boolean).map((line) => {
-                const [main, cat] = line.split(",");
-                const parts = (main || "").trim().split(" ");
-                const amount = parts[0] || "";
-                const item = parts.slice(1).join(" ");
-                return { amount: amount.trim(), item: item.trim(), category: (cat || "dry").trim() };
-              });
-              setEditData({ ...editData, ingredients: parsed });
-            }}
+            value={editData.ingredientsText}
+            onChange={(e) => setEditData({ ...editData, ingredientsText: e.target.value })}
           />
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff", flex: 1 }} onClick={saveEdit}>Save changes</button>
@@ -354,10 +362,10 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
           )}
 
           <button
-            style={{ ...btnStyle, background: isOnMenu ? "var(--bg4)" : "var(--accent)", color: isOnMenu ? "var(--text2)" : "#fff", width: "100%" }}
+            style={{ ...btnStyle, background: "var(--accent)", color: "#fff", width: "100%" }}
             onClick={(e) => { e.stopPropagation(); onAddToMenu(recipe); }}
           >
-            {isOnMenu ? "Already on menu" : "+ Add to this week's menu"}
+            {isOnMenu ? "+ Add to another day" : "+ Add to this week's menu"}
           </button>
         </div>
       )}
@@ -1003,21 +1011,24 @@ export default function App() {
               ) : (
                 <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
                   {library.map((r) => {
-                    const taken = Object.entries(week).find(([d, id]) => id === r.id && d !== pickerDay);
+                    const onDays = Object.entries(week)
+                      .filter(([d, id]) => id === r.id && d !== pickerDay)
+                      .map(([d]) => d);
                     return (
                       <div key={r.id} style={{
                         padding: "12px 14px", borderRadius: "var(--radius3)",
-                        background: taken ? "var(--bg3)" : "var(--bg3)",
+                        background: "var(--bg3)",
                         border: `1.5px solid ${week[pickerDay] === r.id ? "var(--accent)" : "var(--border)"}`,
                         cursor: "pointer", transition: "border-color 0.15s",
-                        opacity: taken ? 0.5 : 1,
-                      }} onClick={() => !taken && assignDay(pickerDay, r.id)}>
+                      }} onClick={() => assignDay(pickerDay, r.id)}>
                         <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{r.title}</div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                           {r.cuisine && <Tag>{r.cuisine}</Tag>}
                           {((r.prepTime || 0) + (r.cookTime || 0)) > 0 && <Tag>⏱ {(r.prepTime || 0) + (r.cookTime || 0)} min</Tag>}
                           {r.skillLevel && <Tag>{r.skillLevel}</Tag>}
-                          {taken && <Tag>📅 {taken[0]}</Tag>}
+                          {onDays.length > 0 && (
+                            <Tag>📅 already on {onDays.map((d) => d.slice(0, 3)).join(", ")}</Tag>
+                          )}
                         </div>
                       </div>
                     );
