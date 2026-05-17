@@ -671,7 +671,7 @@ function ImportPage({ library, onImported, showBanner }) {
       setUrl(""); setCustomName(""); setStage("");
       showBanner(`"${recipe.title}" added to your library!`);
     } catch (e) {
-      setError("Could not extract recipe. Try again or use the custom recipe option.");
+      setError(e?.message || "Could not extract recipe. Try again or use the custom recipe option.");
     }
     setLoading(false); setStage("");
   }
@@ -750,8 +750,8 @@ function ImportPage({ library, onImported, showBanner }) {
           </div>
 
           <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
-            <span style={{ color: "var(--accent)", fontWeight: 600 }}>How it works:</span> Paste any recipe link — a recipe website, YouTube video, TikTok or Instagram reel. We pull the page content (or video caption / description) and use AI to extract the ingredients and times.
-            <br />Best results: <span style={{ color: "var(--text)" }}>recipe websites</span> (AllRecipes, BBC Food, NYT Cooking, etc.), <span style={{ color: "var(--text)" }}>TikTok</span>, and <span style={{ color: "var(--text)" }}>YouTube</span>. Instagram is limited to whatever the public caption shows.
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>How it works:</span> Paste any recipe link — recipe website, YouTube video, TikTok, or Instagram reel. We pull the content and use AI to extract the ingredients and times.
+            <br /><br /><span style={{ color: "var(--accent)", fontWeight: 600 }}>Site blocked?</span> Some sites (AllRecipes, big publishers) block automated requests. Workaround: paste your link into <a href="https://cooking.guru/convert" target="_blank" rel="noreferrer" style={{ color: "var(--accent2)" }}>cooking.guru</a>, click Cook It, then paste the resulting <span style={{ color: "var(--text)" }}>cooking.guru/share/...</span> URL here. We'll pick it up cleanly.
           </div>
 
           {loading && (

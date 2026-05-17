@@ -107,19 +107,118 @@ Rules:
 
 // ─── URL detection ────────────────────────────────────────────
 function detectSource(url) {
+  if (/cooking\.guru\/share\//i.test(url)) return "cooking_guru_share";
   if (/instagram\.com/i.test(url)) return "instagram";
   if (/tiktok\.com/i.test(url)) return "tiktok";
   if (/youtube\.com|youtu\.be/i.test(url)) return "youtube";
   return "web";
 }
 
+// Extract the platform's native video ID from a URL — used to look up
+// already-converted recipes on cooking.guru.
+function extractVideoId(url, source) {
+  if (source === "cooking_guru_share") {
+    const m = /cooking\.guru\/share\/([A-Za-z0-9_-]+)/i.exec(url);
+    return m ? m[1] : null;
+  }
+  if (source === "instagram") {
+    const m = /instagram\.com\/(?:reel|p|reels|tv)\/([A-Za-z0-9_-]+)/i.exec(url);
+    return m ? m[1] : null;
+  }
+  if (source === "tiktok") {
+    const m = /tiktok\.com\/(?:@[^/]+\/video|v)\/(\d+)/i.exec(url);
+    return m ? m[1] : null;
+  }
+  if (source === "youtube") {
+    // youtube.com/watch?v=ID, youtu.be/ID, youtube.com/shorts/ID
+    const m1 = /[?&]v=([A-Za-z0-9_-]{6,})/.exec(url);
+    if (m1) return m1[1];
+    const m2 = /youtu\.be\/([A-Za-z0-9_-]{6,})/.exec(url);
+    if (m2) return m2[1];
+    const m3 = /youtube\.com\/shorts\/([A-Za-z0-9_-]{6,})/.exec(url);
+    if (m3) return m3[1];
+  }
+  return null;
+}
+
+// ─── Cooking.guru shared recipe lookup ────────────────────────
+// Returns null if cooking.guru hasn't converted that video, otherwise raw data.
+async function fetchCookingGuruShare(videoId) {
+  if (!videoId) return null;
+  try {
+    const r = await fetch(`https://api.cooking.guru/shareRecipe?videoID=${encodeURIComponent(videoId)}`, {
+      headers: { "Accept": "application/json", "User-Agent": UA },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    if (!data || !data.title) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Turn cooking.guru's shareRecipe response into the gathered-content shape Claude expects
+function gatheredFromCookingGuru(data, platformLabel) {
+  const ingredients = (data.ingredients || [])
+    .map((i) => typeof i === "string" ? i : i.item || i.name || "")
+    .filter(Boolean);
+  const instructions = (data.instructions || [])
+    .map((ins, i) => {
+      if (typeof ins === "string") return `${i + 1}. ${ins}`;
+      const stepNum = ins.step || (i + 1);
+      const stepText = ins.text || ins.name || "";
+      return stepText ? `${stepNum}. ${stepText}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+  const meta = data.metadata || {};
+  return {
+    platform: platformLabel,
+    kind: "cooking_guru",
+    title: data.title || "",
+    raw: [
+      data.title && `Title: ${data.title}`,
+      data.author && `Source: ${data.author}${data.authorHandle ? ` (@${data.authorHandle})` : ""}`,
+      meta.mealType && `Meal type: ${meta.mealType}`,
+      meta.cookingMethod && `Cooking method: ${meta.cookingMethod}`,
+      meta.cookTime && `Cook time: ${meta.cookTime}`,
+      meta.prepTime && `Prep time: ${meta.prepTime}`,
+      meta.difficulty && `Difficulty: ${meta.difficulty}`,
+      meta.servings && `Servings: ${meta.servings}`,
+      ingredients.length && `\nIngredients:\n${ingredients.join("\n")}`,
+      instructions && `\nInstructions:\n${instructions}`,
+    ].filter(Boolean).join("\n"),
+  };
+}
+
 // ─── Main URL gatherer ────────────────────────────────────────
 async function gatherFromUrl(url) {
   const source = detectSource(url);
 
-  if (source === "youtube") return await gatherYouTube(url);
-  if (source === "tiktok") return await gatherTikTok(url);
-  if (source === "instagram") return await gatherInstagram(url);
+  // Special: cooking.guru share URL — go straight to their public API
+  if (source === "cooking_guru_share") {
+    const videoId = extractVideoId(url, source);
+    const data = await fetchCookingGuruShare(videoId);
+    if (data) return gatheredFromCookingGuru(data, "CookingGuru");
+    throw new Error("Cooking.guru hasn't converted this video yet, or the link is invalid.");
+  }
+
+  // For social platforms: try cooking.guru first (often has it), fall back to our own scraping
+  if (source === "instagram" || source === "tiktok" || source === "youtube") {
+    const platformLabel = { instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube" }[source];
+    const videoId = extractVideoId(url, source);
+    if (videoId) {
+      const cgData = await fetchCookingGuruShare(videoId);
+      if (cgData) return gatheredFromCookingGuru(cgData, platformLabel);
+    }
+    // Fallback to native scraping
+    if (source === "youtube") return await gatherYouTube(url);
+    if (source === "tiktok") return await gatherTikTok(url);
+    if (source === "instagram") return await gatherInstagram(url);
+  }
+
   return await gatherWebRecipe(url);
 }
 
@@ -268,10 +367,18 @@ async function fetchHtml(url) {
       "User-Agent": UA,
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
     },
     signal: AbortSignal.timeout(15000),
     redirect: "follow",
   });
+  if (r.status === 402 || r.status === 403 || r.status === 429) {
+    throw new Error(`This site blocks automated requests (HTTP ${r.status}). Workaround: convert the recipe on cooking.guru first, then paste the cooking.guru share URL here.`);
+  }
   if (!r.ok) throw new Error(`Page fetch failed: ${r.status}`);
   return await r.text();
 }
