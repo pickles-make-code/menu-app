@@ -366,13 +366,38 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
 }
 
 // Day card for Menu tab
-function DayCard({ day, recipe, onAdd, onRemove }) {
+function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
+  const [isOver, setIsOver] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  function handleDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!isOver) setIsOver(true);
+  }
+  function handleDragLeave() {
+    setIsOver(false);
+  }
+  function handleDrop(e) {
+    e.preventDefault();
+    setIsOver(false);
+    const fromDay = e.dataTransfer.getData("text/plain");
+    if (fromDay && fromDay !== day) onSwap(fromDay, day);
+  }
+
   return (
-    <div style={{
-      background: "var(--bg2)", borderRadius: "var(--radius)",
-      border: `1.5px solid ${recipe ? "var(--border2)" : "var(--border)"}`,
-      overflow: "hidden",
-    }}>
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      style={{
+        background: isOver ? "var(--accentbg)" : "var(--bg2)",
+        borderRadius: "var(--radius)",
+        border: `1.5px ${isOver ? "dashed var(--accent)" : `solid ${recipe ? "var(--border2)" : "var(--border)"}`}`,
+        overflow: "hidden",
+        opacity: isDragging ? 0.4 : 1,
+        transition: "border-color 0.15s, background 0.15s, opacity 0.15s",
+      }}>
       <div style={{
         padding: "10px 16px",
         background: "var(--bg3)",
@@ -388,11 +413,24 @@ function DayCard({ day, recipe, onAdd, onRemove }) {
       </div>
 
       {recipe ? (
-        <div style={{ padding: "14px 16px" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
-            {recipe.title}
+        <div
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("text/plain", day);
+            e.dataTransfer.effectAllowed = "move";
+            setIsDragging(true);
+          }}
+          onDragEnd={() => setIsDragging(false)}
+          style={{ padding: "14px 16px", cursor: "grab", userSelect: "none" }}
+          title="Drag to swap with another day"
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ color: "var(--text3)", fontSize: 14, lineHeight: 1, cursor: "grab" }}>⋮⋮</span>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
+              {recipe.title}
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginLeft: 22 }}>
             {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
             {((recipe.prepTime || 0) + (recipe.cookTime || 0)) > 0 && (
               <Tag>⏱ {(recipe.prepTime || 0) + (recipe.cookTime || 0)} min</Tag>
@@ -783,6 +821,15 @@ export default function App() {
     rebuildShoppingList(newWeek, library);
   }
 
+  // Swap (or move) the recipe between two days
+  async function swapDays(fromDay, toDay) {
+    if (fromDay === toDay) return;
+    const newWeek = { ...week, [fromDay]: week[toDay], [toDay]: week[fromDay] };
+    setWeek(newWeek);
+    await saveWeek(newWeek);
+    rebuildShoppingList(newWeek, library);
+  }
+
   function rebuildShoppingList(wk, lib) {
     const assigned = DAYS.map((d) => wk[d]).filter(Boolean);
     const recipes = assigned.map((id) => lib.find((r) => r.id === id)).filter(Boolean);
@@ -990,6 +1037,7 @@ export default function App() {
                     recipe={week[day] ? recipeById(week[day]) : null}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
+                    onSwap={swapDays}
                   />
                 ))}
               </div>
