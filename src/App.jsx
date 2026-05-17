@@ -386,40 +386,16 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
 }
 
 // Day card for Menu tab
-function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
-  const [isOver, setIsOver] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-
-  // Reset dragging state whenever the recipe in this day changes
-  // (handles the case where the source element re-renders mid-drag and onDragEnd doesn't fire)
-  useEffect(() => {
-    setIsDragging(false);
-  }, [recipe?.id]);
-
-  function handleDragOver(e) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (!isOver) setIsOver(true);
-  }
-  function handleDragLeave() {
-    setIsOver(false);
-  }
-  function handleDrop(e) {
-    e.preventDefault();
-    setIsOver(false);
-    const fromDay = e.dataTransfer.getData("text/plain");
-    if (fromDay && fromDay !== day) onSwap(fromDay, day);
-  }
-
+// Drag is driven by Pointer Events at the App level so it works on mouse + touch.
+// `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
+function DayCard({ day, recipe, onAdd, onRemove, onDragStart, isDragging, isTarget }) {
   return (
     <div
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      data-day={day}
       style={{
-        background: isOver ? "var(--accentbg)" : "var(--bg2)",
+        background: isTarget ? "var(--accentbg)" : "var(--bg2)",
         borderRadius: "var(--radius)",
-        border: `1.5px ${isOver ? "dashed var(--accent)" : `solid ${recipe ? "var(--border2)" : "var(--border)"}`}`,
+        border: `1.5px ${isTarget ? "dashed var(--accent)" : `solid ${recipe ? "var(--border2)" : "var(--border)"}`}`,
         overflow: "hidden",
         transition: "border-color 0.15s, background 0.15s",
       }}>
@@ -439,34 +415,50 @@ function DayCard({ day, recipe, onAdd, onRemove, onSwap }) {
 
       {recipe ? (
         <div
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.setData("text/plain", day);
-            e.dataTransfer.effectAllowed = "move";
-            setIsDragging(true);
-          }}
-          onDragEnd={() => setIsDragging(false)}
           style={{
             padding: "14px 16px",
-            cursor: "grab",
             userSelect: "none",
             opacity: isDragging ? 0.4 : 1,
             transition: "opacity 0.15s",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
           }}
-          title="Drag to swap with another day"
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{ color: "var(--text3)", fontSize: 14, lineHeight: 1, cursor: "grab" }}>⋮⋮</span>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
+          {/* Drag handle — only this element captures pointer events so the rest of the card can scroll on touch */}
+          <div
+            onPointerDown={(e) => {
+              // Skip secondary mouse buttons (right-click etc.)
+              if (e.pointerType === "mouse" && e.button !== 0) return;
+              e.preventDefault();
+              onDragStart(day, e.clientX, e.clientY);
+            }}
+            style={{
+              color: "var(--text3)",
+              fontSize: 16,
+              lineHeight: 1,
+              cursor: "grab",
+              touchAction: "none",
+              padding: "4px 6px",
+              marginLeft: -6,
+              marginTop: 1,
+              userSelect: "none",
+            }}
+            title="Drag to swap with another day"
+          >
+            ⋮⋮
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
               {recipe.title}
             </div>
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginLeft: 22 }}>
-            {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
-            {((recipe.prepTime || 0) + (recipe.cookTime || 0)) > 0 && (
-              <Tag>⏱ {(recipe.prepTime || 0) + (recipe.cookTime || 0)} min</Tag>
-            )}
-            {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
+              {((recipe.prepTime || 0) + (recipe.cookTime || 0)) > 0 && (
+                <Tag>⏱ {(recipe.prepTime || 0) + (recipe.cookTime || 0)} min</Tag>
+              )}
+              {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
+            </div>
           </div>
         </div>
       ) : (
@@ -778,6 +770,10 @@ export default function App() {
   // List: breakdown toggle per item
   const [expandedItems, setExpandedItems] = useState({});
 
+  // Menu drag-and-drop state (works on mouse + touch via Pointer Events)
+  const [dragSource, setDragSource] = useState(null); // day currently being dragged
+  const [dragTarget, setDragTarget] = useState(null); // day pointer is currently over
+
   // ── Persistence ──
   useEffect(() => {
     async function load() {
@@ -860,6 +856,45 @@ export default function App() {
     await saveWeek(newWeek);
     rebuildShoppingList(newWeek, library);
   }
+
+  // Pointer-event drag for menu reordering (unifies mouse + touch)
+  function startDayDrag(day) {
+    setDragSource(day);
+    setDragTarget(null);
+  }
+
+  useEffect(() => {
+    if (!dragSource) return;
+
+    function findDayUnderPointer(x, y) {
+      const el = document.elementFromPoint(x, y);
+      const card = el && el.closest ? el.closest("[data-day]") : null;
+      return card ? card.dataset.day : null;
+    }
+
+    function onMove(e) {
+      const day = findDayUnderPointer(e.clientX, e.clientY);
+      setDragTarget(day);
+    }
+
+    function onEnd(e) {
+      const day = findDayUnderPointer(e.clientX, e.clientY);
+      if (day && day !== dragSource) {
+        swapDays(dragSource, day);
+      }
+      setDragSource(null);
+      setDragTarget(null);
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+  }, [dragSource]); // intentionally only re-bind when source changes
 
   function rebuildShoppingList(wk, lib) {
     const assigned = DAYS.map((d) => wk[d]).filter(Boolean);
@@ -1071,7 +1106,9 @@ export default function App() {
                     recipe={week[day] ? recipeById(week[day]) : null}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
-                    onSwap={swapDays}
+                    onDragStart={startDayDrag}
+                    isDragging={dragSource === day}
+                    isTarget={dragTarget === day && dragSource !== day}
                   />
                 ))}
               </div>
