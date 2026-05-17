@@ -144,6 +144,21 @@ function clearStoredHouseholdCode() {
 }
 
 // Read leftover data from the pre-sync localStorage version, so users can migrate.
+// Normalize the week state shape. Old data stored just a recipe id per day; the new format
+// stores { id, mult } so each day can have its own serving multiplier.
+function normalizeWeek(wk) {
+  const empty = Object.fromEntries(DAYS.map((d) => [d, null]));
+  if (!wk || typeof wk !== "object") return empty;
+  const out = { ...empty };
+  for (const d of DAYS) {
+    const v = wk[d];
+    if (!v) continue;
+    if (typeof v === "string") { out[d] = { id: v, mult: 1 }; continue; }
+    if (typeof v === "object" && v.id) { out[d] = { id: v.id, mult: Math.max(1, parseInt(v.mult, 10) || 1) }; continue; }
+  }
+  return out;
+}
+
 function readLegacyLocalData() {
   try {
     const lib = JSON.parse(localStorage.getItem("menu_library_v2") || "null");
@@ -456,7 +471,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
 
           <button
             style={{ ...btnStyle, background: "var(--accent)", color: "#fff", width: "100%" }}
-            onClick={(e) => { e.stopPropagation(); onAddToMenu(recipe); }}
+            onClick={(e) => { e.stopPropagation(); onAddToMenu(recipe, servMult); }}
           >
             {isOnMenu ? "+ Add to another day" : "+ Add to this week's menu"}
           </button>
@@ -467,10 +482,16 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
 }
 
 // Full-screen recipe viewer modal — opened by tapping a day's recipe on the Menu tab
-function RecipeViewer({ recipe, day, onClose }) {
-  const [servMult, setServMult] = useState(1);
+function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClose }) {
+  const [servMult, setServMult] = useState(initialMult);
+  useEffect(() => { setServMult(initialMult); }, [initialMult]);
   if (!recipe) return null;
   const totalTime = (recipe.prepTime || 0) + (recipe.cookTime || 0);
+
+  function pickMult(m) {
+    setServMult(m);
+    if (onMultChange) onMultChange(m);
+  }
 
   return (
     <div
@@ -525,7 +546,7 @@ function RecipeViewer({ recipe, day, onClose }) {
         {/* Body */}
         <div style={{ padding: "14px 18px 20px" }}>
           {/* Servings */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, color: "var(--text2)" }}>
               Servings: <span style={{ color: "var(--text)" }}>{(recipe.servings || 4) * servMult}</span>
             </span>
@@ -538,11 +559,16 @@ function RecipeViewer({ recipe, day, onClose }) {
                     background: servMult === m ? "var(--accent)" : "var(--bg4)",
                     color: servMult === m ? "#fff" : "var(--text2)",
                   }}
-                  onClick={() => setServMult(m)}
+                  onClick={() => pickMult(m)}
                 >×{m}</button>
               ))}
             </div>
           </div>
+          {onMultChange && (
+            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 14 }}>
+              Changing the multiplier updates this day's shopping list amounts.
+            </div>
+          )}
 
           {/* Ingredients */}
           {recipe.ingredients?.length > 0 && (
@@ -667,8 +693,15 @@ function DayCard({ day, recipe, onAdd, onRemove, onView, onDragStart, isDragging
             onClick={() => onView && onView(day)}
             title="Tap to view full recipe"
           >
-            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
-              {recipe.title}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
+                {recipe.title}
+              </div>
+              {mult > 1 && (
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "var(--accentbg)", padding: "2px 7px", borderRadius: 4 }}>
+                  ×{mult}
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
@@ -710,16 +743,20 @@ function multiplyAmount(amount, mult) {
 }
 
 // Combine identical ingredients across recipes
-function buildShoppingList(recipes) {
+function buildShoppingList(items) {
+  // items: [{ recipe, mult }]
   const combined = {};
-  for (const recipe of recipes) {
+  for (const { recipe, mult } of items) {
+    const m = mult || 1;
     for (const ing of (recipe.ingredients || [])) {
       const key = ing.item.toLowerCase().trim();
       const cat = ing.category || "dry";
       if (!combined[key]) {
         combined[key] = { item: ing.item, category: cat, entries: [] };
       }
-      combined[key].entries.push({ amount: ing.amount, recipe: recipe.title });
+      const scaled = multiplyAmount(ing.amount, m);
+      const label = m > 1 ? `${recipe.title} (×${m})` : recipe.title;
+      combined[key].entries.push({ amount: scaled, recipe: label });
     }
   }
   // Parse and sum amounts where possible
@@ -1120,6 +1157,9 @@ export default function App() {
   // Menu: tap-to-view recipe modal
   const [viewingDay, setViewingDay] = useState(null);
 
+  // Multiplier carried through the day picker (set when a recipe was viewed/scaled before adding)
+  const [pendingMult, setPendingMult] = useState(1);
+
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
   const [loadError, setLoadError] = useState("");
@@ -1161,7 +1201,7 @@ export default function App() {
         const wk = await sget(SK.menu);
         const sl = await sget(SK.list);
         if (lib) setLibrary(lib);
-        if (wk && Object.keys(wk).length) setWeek(wk);
+        if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
       } catch (e) {
         setLoadError(e.message || "Failed to load household data.");
@@ -1201,7 +1241,7 @@ export default function App() {
     setLibrary(lib); await saveLibrary(lib);
     // Remove from week if present
     const newWeek = { ...week };
-    for (const day of DAYS) { if (newWeek[day] === id) newWeek[day] = null; }
+    for (const day of DAYS) { if (newWeek[day]?.id === id) newWeek[day] = null; }
     setWeek(newWeek); await saveWeek(newWeek);
     rebuildShoppingList(newWeek, lib);
   }
@@ -1212,9 +1252,9 @@ export default function App() {
   }
 
   // ── Week / menu ops ──
-  async function assignDay(day, recipeId) {
-    const newWeek = { ...week, [day]: recipeId };
-    setWeek(newWeek); setPickerDay(null);
+  async function assignDay(day, recipeId, mult = 1) {
+    const newWeek = { ...week, [day]: { id: recipeId, mult: Math.max(1, mult || 1) } };
+    setWeek(newWeek); setPickerDay(null); setPendingMult(1);
     await saveWeek(newWeek);
     // Bump menuCount
     const lib = library.map((r) => {
@@ -1228,6 +1268,14 @@ export default function App() {
 
   async function removeFromDay(day) {
     const newWeek = { ...week, [day]: null };
+    setWeek(newWeek); await saveWeek(newWeek);
+    rebuildShoppingList(newWeek, library);
+  }
+
+  // Change just the multiplier for a day's existing recipe assignment
+  async function updateDayMult(day, mult) {
+    if (!week[day]) return;
+    const newWeek = { ...week, [day]: { ...week[day], mult: Math.max(1, mult || 1) } };
     setWeek(newWeek); await saveWeek(newWeek);
     rebuildShoppingList(newWeek, library);
   }
@@ -1281,9 +1329,12 @@ export default function App() {
   }, [dragSource]); // intentionally only re-bind when source changes
 
   function rebuildShoppingList(wk, lib) {
-    const assigned = DAYS.map((d) => wk[d]).filter(Boolean);
-    const recipes = assigned.map((id) => lib.find((r) => r.id === id)).filter(Boolean);
-    const list = buildShoppingList(recipes).map((item) => {
+    const items = DAYS
+      .map((d) => wk[d])
+      .filter(Boolean)
+      .map((entry) => ({ recipe: lib.find((r) => r.id === entry.id), mult: entry.mult || 1 }))
+      .filter((x) => x.recipe);
+    const list = buildShoppingList(items).map((item) => {
       const existing = shoppingList.find((i) => i.item.toLowerCase() === item.item.toLowerCase());
       return { ...item, checked: existing?.checked || false };
     });
@@ -1308,7 +1359,7 @@ export default function App() {
 
   // ── Derived ──
   const recipeById = (id) => library.find((r) => r.id === id);
-  const menuRecipeIds = new Set(DAYS.map((d) => week[d]).filter(Boolean));
+  const menuRecipeIds = new Set(DAYS.map((d) => week[d]?.id).filter(Boolean));
 
   const libFiltered = library.filter((r) => {
     const matchSearch = !libSearch || r.title.toLowerCase().includes(libSearch.toLowerCase());
@@ -1451,8 +1502,10 @@ export default function App() {
         {/* Recipe viewer modal — tap a day's card on the Menu tab to open */}
         {viewingDay && week[viewingDay] && (
           <RecipeViewer
-            recipe={recipeById(week[viewingDay])}
+            recipe={recipeById(week[viewingDay].id)}
             day={viewingDay}
+            mult={week[viewingDay].mult || 1}
+            onMultChange={(m) => updateDayMult(viewingDay, m)}
             onClose={() => setViewingDay(null)}
           />
         )}
@@ -1462,7 +1515,7 @@ export default function App() {
           <div style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 300,
             display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
-          }} onClick={() => setPickerDay(null)}>
+          }} onClick={() => { setPickerDay(null); setPendingMult(1); }}>
             <div style={{
               background: "var(--bg2)", borderRadius: "var(--radius)", padding: 20,
               width: "100%", maxWidth: 420, maxHeight: "80vh", overflow: "hidden",
@@ -1473,7 +1526,7 @@ export default function App() {
                   <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 17, fontWeight: 600 }}>Pick a recipe</div>
                   <div style={{ fontSize: 12, color: "var(--accent)", marginTop: 2 }}>{pickerDay}</div>
                 </div>
-                <button style={{ background: "none", fontSize: 18, color: "var(--text3)", padding: 4 }} onClick={() => setPickerDay(null)}>✕</button>
+                <button style={{ background: "none", fontSize: 18, color: "var(--text3)", padding: 4 }} onClick={() => { setPickerDay(null); setPendingMult(1); }}>✕</button>
               </div>
               {library.length === 0 ? (
                 <div style={{ fontSize: 13, color: "var(--text2)", textAlign: "center", padding: "30px 0" }}>
@@ -1484,15 +1537,15 @@ export default function App() {
                 <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
                   {library.map((r) => {
                     const onDays = Object.entries(week)
-                      .filter(([d, id]) => id === r.id && d !== pickerDay)
+                      .filter(([d, entry]) => entry?.id === r.id && d !== pickerDay)
                       .map(([d]) => d);
                     return (
                       <div key={r.id} style={{
                         padding: "12px 14px", borderRadius: "var(--radius3)",
                         background: "var(--bg3)",
-                        border: `1.5px solid ${week[pickerDay] === r.id ? "var(--accent)" : "var(--border)"}`,
+                        border: `1.5px solid ${week[pickerDay]?.id === r.id ? "var(--accent)" : "var(--border)"}`,
                         cursor: "pointer", transition: "border-color 0.15s",
-                      }} onClick={() => assignDay(pickerDay, r.id)}>
+                      }} onClick={() => assignDay(pickerDay, r.id, pendingMult)}>
                         <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{r.title}</div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                           {r.cuisine && <Tag>{r.cuisine}</Tag>}
@@ -1528,7 +1581,8 @@ export default function App() {
                   <DayCard
                     key={day}
                     day={day}
-                    recipe={week[day] ? recipeById(week[day]) : null}
+                    recipe={week[day] ? recipeById(week[day].id) : null}
+                    mult={week[day]?.mult || 1}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
                     onView={(d) => setViewingDay(d)}
@@ -1609,7 +1663,7 @@ export default function App() {
                     key={r.id}
                     recipe={r}
                     isOnMenu={menuRecipeIds.has(r.id)}
-                    onAddToMenu={(recipe) => setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0])}
+                    onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
                     onToggleFav={toggleFav}
                     onDelete={deleteRecipe}
                     onEdit={updateRecipe}
