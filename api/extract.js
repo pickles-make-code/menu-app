@@ -4,6 +4,18 @@
 // GET  /api/extract?url=...          → extract recipe from social link via cooking.guru
 // POST /api/extract {custom:true}    → structure a custom recipe from user ingredients
 
+// Shared category guidance — used in every prompt so Claude assigns the right
+// supermarket-aisle category to every ingredient instead of defaulting to "dry".
+const CATEGORY_GUIDE = `Each ingredient's "category" must be assigned by where it lives in a supermarket. Use exactly one of these IDs:
+- fruit_veg: fresh fruits, fresh vegetables, fresh herbs (basil, parsley, coriander, mint, etc.), garlic, ginger, lemons, limes, chillies
+- meat: raw meat, poultry, seafood, fish, prawns, mince (anything fresh/uncooked from the butcher or fish counter)
+- dairy: milk, cream, butter, yogurt, cheese, eggs, halloumi, feta, mascarpone, ricotta
+- deli: cured / cooked meats (prosciutto, salami, bacon, chorizo), prepared sauces (pesto, hummus, tapenade, harissa), olives, antipasti, fresh pasta and fresh stuffed pasta
+- dry: dried pasta, rice, grains, flour, sugar, salt, spices, dried herbs, oils, vinegars, condiments, canned/jarred goods (tomatoes, beans, coconut milk), stock, nuts, breadcrumbs
+- freezer: frozen vegetables (peas, corn, spinach), frozen fruit/berries, frozen pastry, frozen prawns, ice cream
+
+Examples: "salmon fillets" → meat. "rigatoni" → dry. "jar of pesto" → deli. "frozen peas" → freezer. "fresh basil" → fruit_veg. "parmesan" → dairy.`;
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -38,9 +50,12 @@ Return ONLY valid JSON, no markdown, no explanation:
   "servings": 4,
   "skillLevel": "Easy|Medium|Advanced",
   "ingredients": [
-    {"item": "ingredient name", "amount": "metric amount", "category": "fruit_veg|meat|dairy|deli|dry|freezer"}
+    {"item": "salmon fillets", "amount": "2", "category": "meat"},
+    {"item": "rigatoni", "amount": "300g", "category": "dry"}
   ]
 }
+
+${CATEGORY_GUIDE}
 
 Rules:
 - Use ONLY the ingredients the user provided. Do not add extras.
@@ -116,8 +131,9 @@ Extract the recipe and return ONLY valid JSON:
   ]
 }
 
+${CATEGORY_GUIDE}
+
 Rules:
-- category must be one of: fruit_veg, meat, dairy, deli, dry, freezer
 - ALL amounts must be metric (g, kg, ml, L). Countable items (eggs, cloves) stay as numbers.
 - Return 6-16 ingredients. No method in JSON.
 - If no clear recipe found, return {"error": "No recipe found in page content"}`
@@ -139,8 +155,9 @@ Return ONLY valid JSON:
   ]
 }
 
+${CATEGORY_GUIDE}
+
 Rules:
-- category must be one of: fruit_veg, meat, dairy, deli, dry, freezer
 - ALL amounts must be metric. Countable items stay as numbers.
 - Return 6-16 ingredients. No method.
 - If you truly cannot determine a recipe, return {"error": "Cannot determine recipe — please add it manually"}`;
