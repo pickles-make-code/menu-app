@@ -32,18 +32,20 @@ export default async function handler(req, res) {
       const data = await redis.get(key(code));
       if (!data) {
         // New household — return empty defaults so the client doesn't have to special-case
-        return res.status(200).json({ library: [], week: {}, list: [] });
+        return res.status(200).json({ library: [], week: {}, list: [], cleaning: [], pharmacy: [] });
       }
       // @upstash/redis auto-parses JSON; data is already an object
       return res.status(200).json({
         library: data.library || [],
         week: data.week || {},
         list: data.list || [],
+        cleaning: data.cleaning || [],
+        pharmacy: data.pharmacy || [],
       });
     }
 
     if (req.method === "POST") {
-      const { code, library, week, list } = req.body || {};
+      const { code, library, week, list, cleaning, pharmacy } = req.body || {};
       if (!isValidCode(code)) {
         return res.status(400).json({ error: "Invalid household code." });
       }
@@ -51,6 +53,8 @@ export default async function handler(req, res) {
         library: Array.isArray(library) ? library : [],
         week: week && typeof week === "object" ? week : {},
         list: Array.isArray(list) ? list : [],
+        cleaning: Array.isArray(cleaning) ? cleaning : [],
+        pharmacy: Array.isArray(pharmacy) ? pharmacy : [],
         _updatedAt: Date.now(),
       };
       // @upstash/redis auto-serializes objects via JSON

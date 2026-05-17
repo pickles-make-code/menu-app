@@ -5,6 +5,8 @@ const SK = {
   library: "menu_library_v2",
   menu: "menu_week_v2",
   list: "menu_list_v2",
+  cleaning: "menu_cleaning_v1",
+  pharmacy: "menu_pharmacy_v1",
 };
 
 // ─── Constants ────────────────────────────────────────────────
@@ -27,6 +29,91 @@ const SKILL_LEVELS = ["Easy","Medium","Advanced"];
 
 // ─── Helpers ─────────────────────────────────────────────────
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+// Title-case every word in a string ("salmon pesto rigatoni" → "Salmon Pesto Rigatoni").
+function titleCase(s) {
+  if (!s || typeof s !== "string") return s;
+  return s.replace(/\S+/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+}
+
+// Convert British/American food terms to Australian English.
+const AUS_TERM_REPLACEMENTS = [
+  [/\bcourgettes\b/gi, "Zucchinis"],
+  [/\bcourgette\b/gi, "Zucchini"],
+  [/\baubergines\b/gi, "Eggplants"],
+  [/\baubergine\b/gi, "Eggplant"],
+  [/\bshrimps\b/gi, "Prawns"],
+  [/\bshrimp\b/gi, "Prawns"],
+  [/\bcilantro\b/gi, "Coriander"],
+  [/\bscallions\b/gi, "Spring Onions"],
+  [/\bscallion\b/gi, "Spring Onion"],
+  [/\bbell peppers\b/gi, "Capsicums"],
+  [/\bbell pepper\b/gi, "Capsicum"],
+  [/\bground beef\b/gi, "Beef Mince"],
+  [/\bground pork\b/gi, "Pork Mince"],
+  [/\bground turkey\b/gi, "Turkey Mince"],
+  [/\bground chicken\b/gi, "Chicken Mince"],
+  [/\bground lamb\b/gi, "Lamb Mince"],
+  [/\bketchup\b/gi, "Tomato Sauce"],
+  [/\barugula\b/gi, "Rocket"],
+  [/\bgarbanzo beans\b/gi, "Chickpeas"],
+  [/\bgarbanzo\b/gi, "Chickpea"],
+  [/\bcheesecloth\b/gi, "Muslin"],
+  [/\beggplant\b/gi, "Eggplant"],
+];
+
+function australianise(s) {
+  if (!s || typeof s !== "string") return s;
+  let out = s;
+  for (const [re, rep] of AUS_TERM_REPLACEMENTS) out = out.replace(re, rep);
+  return out;
+}
+
+// Clean a user-facing string: trim, australianise, then title-case.
+function cleanText(s) {
+  return titleCase(australianise((s || "").trim()));
+}
+
+// Pantry staples never go on the shopping list — you always have them.
+const PANTRY_STAPLES = [
+  /^water$/i,
+  /^salt$/i,
+  /^(?:flaky?|sea|kosher|table|rock)\s+salt$/i,
+  /^salt\s+(?:and|&)\s+pepper$/i,
+  /^pepper$/i,
+  /^(?:black|white|ground|cracked)\s*pepper$/i,
+  /^(?:olive|cooking|vegetable|sunflower|canola|rapeseed)\s+oil$/i,
+  /^extra[\s-]?virgin\s+olive\s+oil$/i,
+  /^(?:cooking\s+)?spray$/i,
+];
+
+function isPantryStaple(item) {
+  if (!item) return false;
+  const s = item.trim();
+  return PANTRY_STAPLES.some((re) => re.test(s));
+}
+
+// Eggs belong in deli, not dairy. Fix legacy data on the fly.
+function correctCategory(item, category) {
+  if (!item) return category;
+  const i = item.toLowerCase().trim();
+  if (/(?:^|\s)eggs?$/.test(i) && (category === "dairy" || !category)) return "deli";
+  return category || "dry";
+}
+
+// Normalize a recipe object: apply Aus English + title case to title and ingredient items.
+function normalizeRecipe(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    title: cleanText(r.title || ""),
+    ingredients: (r.ingredients || []).map((ing) => ({
+      ...ing,
+      item: cleanText(ing.item || ""),
+      category: correctCategory(ing.item || "", ing.category),
+    })),
+  };
+}
 
 function detectPlatform(url) {
   if (/instagram\.com/i.test(url)) return "instagram";
@@ -77,7 +164,7 @@ async function generateCustomRecipe(details) {
 const HOUSEHOLD_LS_KEY = "menu_household_code";
 
 const _state = {
-  cache: { library: null, week: null, list: null },
+  cache: { library: null, week: null, list: null, cleaning: null, pharmacy: null },
   code: null,
   loaded: false,
   saveTimer: null,
@@ -87,6 +174,8 @@ const FIELD_FOR_KEY = {
   menu_library_v2: "library",
   menu_week_v2: "week",
   menu_list_v2: "list",
+  menu_cleaning_v1: "cleaning",
+  menu_pharmacy_v1: "pharmacy",
 };
 
 async function loadHousehold(code) {
@@ -100,6 +189,8 @@ async function loadHousehold(code) {
     library: Array.isArray(data.library) ? data.library : [],
     week: data.week && typeof data.week === "object" ? data.week : {},
     list: Array.isArray(data.list) ? data.list : [],
+    cleaning: Array.isArray(data.cleaning) ? data.cleaning : [],
+    pharmacy: Array.isArray(data.pharmacy) ? data.pharmacy : [],
   };
   _state.code = code;
   _state.loaded = true;
@@ -140,7 +231,7 @@ function clearStoredHouseholdCode() {
   try { localStorage.removeItem(HOUSEHOLD_LS_KEY); } catch {}
   _state.code = null;
   _state.loaded = false;
-  _state.cache = { library: null, week: null, list: null };
+  _state.cache = { library: null, week: null, list: null, cleaning: null, pharmacy: null };
 }
 
 // Read leftover data from the pre-sync localStorage version, so users can migrate.
@@ -309,7 +400,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
       .map((line) => line.trim())
       .filter(Boolean);
     const { ingredientsText, methodText, ...rest } = editData;
-    onEdit({ ...recipe, ...rest, ingredients: parsedIngredients, method: parsedMethod });
+    onEdit(normalizeRecipe({ ...recipe, ...rest, ingredients: parsedIngredients, method: parsedMethod }));
     setEditing(false);
     setEditData(null);
   }
@@ -477,6 +568,92 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Reusable section for the bottom of the List tab — Cleaning or Pharmacy
+function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
+  const [input, setInput] = useState("");
+  const checkedCount = items.filter((i) => i.checked).length;
+
+  function submit() {
+    const v = input.trim();
+    if (!v) return;
+    onAdd(v);
+    setInput("");
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 16 }}>{icon}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "1px" }}>{title}</span>
+        <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+        {items.length > 0 && (
+          <span style={{ fontSize: 11, color: "var(--text3)" }}>
+            {checkedCount}/{items.length}
+          </span>
+        )}
+      </div>
+
+      {/* Existing items */}
+      {items.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+          {items.map((item) => (
+            <div key={item.id} style={{
+              background: "var(--bg2)", borderRadius: "var(--radius3)",
+              border: `1.5px solid ${item.checked ? "var(--border)" : "var(--border2)"}`,
+              display: "flex", alignItems: "center", gap: 12, padding: "11px 14px",
+              transition: "border-color 0.2s",
+            }}>
+              <div
+                style={{
+                  width: 20, height: 20, borderRadius: 5,
+                  border: `2px solid ${item.checked ? "var(--accent)" : "var(--border2)"}`,
+                  background: item.checked ? "var(--accent)" : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  flexShrink: 0, cursor: "pointer", transition: "all 0.15s",
+                }}
+                onClick={() => onToggle(item.id)}
+              >
+                {item.checked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
+              </div>
+              <span
+                style={{
+                  flex: 1, fontSize: 14,
+                  color: item.checked ? "var(--text3)" : "var(--text)",
+                  textDecoration: item.checked ? "line-through" : "none",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                }}
+                onClick={() => onToggle(item.id)}
+              >{item.text}</span>
+              <button
+                style={{ background: "none", fontSize: 14, color: "var(--text3)", padding: 2 }}
+                onClick={() => onRemove(item.id)}
+                title="Remove"
+              >🗑</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add input */}
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          style={{ ...inputStyle, flex: 1 }}
+          placeholder={`Add a ${title.toLowerCase()} item...`}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+        <button
+          style={{ ...btnStyle, background: input.trim() ? "var(--accent)" : "var(--bg4)", color: input.trim() ? "#fff" : "var(--text3)", padding: "9px 16px" }}
+          onClick={submit}
+          disabled={!input.trim()}
+        >Add</button>
+      </div>
     </div>
   );
 }
@@ -749,10 +926,13 @@ function buildShoppingList(items) {
   for (const { recipe, mult } of items) {
     const m = mult || 1;
     for (const ing of (recipe.ingredients || [])) {
-      const key = ing.item.toLowerCase().trim();
-      const cat = ing.category || "dry";
+      const displayItem = cleanText(ing.item);
+      // Skip pantry staples — user always has them
+      if (isPantryStaple(displayItem)) continue;
+      const key = displayItem.toLowerCase().trim();
+      const cat = correctCategory(displayItem, ing.category);
       if (!combined[key]) {
-        combined[key] = { item: ing.item, category: cat, entries: [] };
+        combined[key] = { item: displayItem, category: cat, entries: [] };
       }
       const scaled = multiplyAmount(ing.amount, m);
       const label = m > 1 ? `${recipe.title} (×${m})` : recipe.title;
@@ -826,7 +1006,7 @@ function ImportPage({ library, onImported, showBanner }) {
       setStage("Extracting ingredients...");
       const data = await fetchViaAPI(url.trim());
       setStage("Saving to your library...");
-      const recipe = {
+      const recipe = normalizeRecipe({
         id: uid(),
         sourceUrl: url.trim(),
         platform,
@@ -841,7 +1021,7 @@ function ImportPage({ library, onImported, showBanner }) {
         favourite: false,
         menuCount: 0,
         addedAt: Date.now(),
-      };
+      });
       onImported(recipe);
       setUrl(""); setCustomName(""); setStage("");
       showBanner(`"${recipe.title}" added to your library!`);
@@ -857,7 +1037,7 @@ function ImportPage({ library, onImported, showBanner }) {
     try {
       setStage("Generating recipe details...");
       const data = await generateCustomRecipe({ title: customName, ingredients: customIngredients, method: customMethod });
-      const recipe = {
+      const recipe = normalizeRecipe({
         id: uid(), sourceUrl: null, platform: "custom",
         title: customName.trim(),
         cuisine: data.cuisine || "Other",
@@ -868,7 +1048,7 @@ function ImportPage({ library, onImported, showBanner }) {
         ingredients: data.ingredients || [],
         method: customMethod.trim() ? customMethod.trim().split("\n").filter(Boolean) : [],
         favourite: false, menuCount: 0, addedAt: Date.now(),
-      };
+      });
       onImported(recipe);
       setCustomName(""); setCustomIngredients(""); setCustomMethod(""); setStage("");
       showBanner(`"${recipe.title}" added to your library!`);
@@ -1160,6 +1340,10 @@ export default function App() {
   // Multiplier carried through the day picker (set when a recipe was viewed/scaled before adding)
   const [pendingMult, setPendingMult] = useState(1);
 
+  // Cleaning + Pharmacy custom lists (separate from the grocery shopping list)
+  const [cleaning, setCleaning] = useState([]);
+  const [pharmacy, setPharmacy] = useState([]);
+
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
   const [loadError, setLoadError] = useState("");
@@ -1186,6 +1370,8 @@ export default function App() {
     setLibrary([]);
     setWeek(Object.fromEntries(DAYS.map((d) => [d, null])));
     setShoppingList([]);
+    setCleaning([]);
+    setPharmacy([]);
     setStorageReady(false);
   }
 
@@ -1200,9 +1386,13 @@ export default function App() {
         const lib = await sget(SK.library);
         const wk = await sget(SK.menu);
         const sl = await sget(SK.list);
+        const cl = await sget(SK.cleaning);
+        const ph = await sget(SK.pharmacy);
         if (lib) setLibrary(lib);
         if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
+        if (Array.isArray(cl)) setCleaning(cl);
+        if (Array.isArray(ph)) setPharmacy(ph);
       } catch (e) {
         setLoadError(e.message || "Failed to load household data.");
       }
@@ -1215,6 +1405,40 @@ export default function App() {
   const saveLibrary = useCallback(async (lib) => { await sset(SK.library, lib); }, []);
   const saveWeek = useCallback(async (wk) => { await sset(SK.menu, wk); }, []);
   const saveList = useCallback(async (sl) => { await sset(SK.list, sl); }, []);
+  const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
+  const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
+
+  // Cleaning / Pharmacy CRUD — used by the extra sections at the bottom of the List tab.
+  async function addExtraItem(category, text) {
+    const cleaned = cleanText(text);
+    if (!cleaned) return;
+    const item = { id: uid(), text: cleaned, checked: false };
+    if (category === "cleaning") {
+      const updated = [...cleaning, item];
+      setCleaning(updated); await saveCleaning(updated);
+    } else {
+      const updated = [...pharmacy, item];
+      setPharmacy(updated); await savePharmacy(updated);
+    }
+  }
+  async function toggleExtraItem(category, id) {
+    if (category === "cleaning") {
+      const updated = cleaning.map((i) => i.id === id ? { ...i, checked: !i.checked } : i);
+      setCleaning(updated); await saveCleaning(updated);
+    } else {
+      const updated = pharmacy.map((i) => i.id === id ? { ...i, checked: !i.checked } : i);
+      setPharmacy(updated); await savePharmacy(updated);
+    }
+  }
+  async function removeExtraItem(category, id) {
+    if (category === "cleaning") {
+      const updated = cleaning.filter((i) => i.id !== id);
+      setCleaning(updated); await saveCleaning(updated);
+    } else {
+      const updated = pharmacy.filter((i) => i.id !== id);
+      setPharmacy(updated); await savePharmacy(updated);
+    }
+  }
 
   function showBanner(msg) {
     setBanner(msg);
@@ -1801,6 +2025,24 @@ export default function App() {
                   );
                 })
               )}
+
+              {/* Fixed extra sections — always visible, persist independently of weekly menu */}
+              <ExtraSection
+                title="Cleaning"
+                icon="🧴"
+                items={cleaning}
+                onAdd={(text) => addExtraItem("cleaning", text)}
+                onToggle={(id) => toggleExtraItem("cleaning", id)}
+                onRemove={(id) => removeExtraItem("cleaning", id)}
+              />
+              <ExtraSection
+                title="Pharmacy"
+                icon="💊"
+                items={pharmacy}
+                onAdd={(text) => addExtraItem("pharmacy", text)}
+                onToggle={(id) => toggleExtraItem("pharmacy", id)}
+                onRemove={(id) => removeExtraItem("pharmacy", id)}
+              />
             </div>
           )}
 

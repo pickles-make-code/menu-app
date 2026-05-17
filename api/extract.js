@@ -6,15 +6,21 @@
 
 // Shared category guidance — used in every prompt so Claude assigns the right
 // supermarket-aisle category to every ingredient instead of defaulting to "dry".
-const CATEGORY_GUIDE = `Each ingredient's "category" must be assigned by where it lives in a supermarket. Use exactly one of these IDs:
+const CATEGORY_GUIDE = `IMPORTANT LANGUAGE RULES:
+- Use Australian English spelling and naming throughout. Examples: zucchini (NOT courgette), eggplant (NOT aubergine), prawns (NOT shrimp), capsicum (NOT bell pepper), coriander (NOT cilantro), spring onions (NOT scallions), mince (NOT ground meat), tomato sauce (NOT ketchup).
+- Capitalise the first letter of every word in the ingredient name (Title Case). E.g. "salmon fillets" → "Salmon Fillets", "garlic cloves" → "Garlic Cloves".
+
+Each ingredient's "category" must be assigned by where it lives in a supermarket. Use exactly one of these IDs:
 - fruit_veg: fresh fruits, fresh vegetables, fresh herbs (basil, parsley, coriander, mint, etc.), garlic, ginger, lemons, limes, chillies
 - meat: raw meat, poultry, seafood, fish, prawns, mince (anything fresh/uncooked from the butcher or fish counter)
-- dairy: milk, cream, butter, yogurt, cheese, eggs, halloumi, feta, mascarpone, ricotta
-- deli: cured / cooked meats (prosciutto, salami, bacon, chorizo), prepared sauces (pesto, hummus, tapenade, harissa), olives, antipasti, fresh pasta and fresh stuffed pasta
-- dry: dried pasta, rice, grains, flour, sugar, salt, spices, dried herbs, oils, vinegars, condiments, canned/jarred goods (tomatoes, beans, coconut milk), stock, nuts, breadcrumbs
+- dairy: milk, cream, butter, yoghurt, cheese, halloumi, feta, mascarpone, ricotta (eggs do NOT go here — eggs are deli)
+- deli: cured / cooked meats (prosciutto, salami, bacon, chorizo), eggs, prepared sauces (pesto, hummus, tapenade, harissa), olives, antipasti, fresh pasta and fresh stuffed pasta
+- dry: dried pasta, rice, grains, flour, spices, dried herbs, vinegars, condiments, canned/jarred goods (tomatoes, beans, coconut milk), stock, nuts, breadcrumbs
 - freezer: frozen vegetables (peas, corn, spinach), frozen fruit/berries, frozen pastry, frozen prawns, ice cream
 
-Examples: "salmon fillets" → meat. "rigatoni" → dry. "jar of pesto" → deli. "frozen peas" → freezer. "fresh basil" → fruit_veg. "parmesan" → dairy.`;
+Examples: "Salmon Fillets" → meat. "Rigatoni" → dry. "Jar Of Pesto" → deli. "Eggs" → deli. "Frozen Peas" → freezer. "Fresh Basil" → fruit_veg. "Parmesan" → dairy. "Zucchini" → fruit_veg.
+
+OMIT these pantry staples — do NOT include them in the ingredients list at all: water, salt, black pepper, ground pepper, olive oil, vegetable oil, cooking oil, canola oil, sunflower oil, cooking spray.`;
 
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
