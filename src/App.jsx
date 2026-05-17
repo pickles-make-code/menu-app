@@ -106,17 +106,26 @@ function isPantryStaple(item) {
   return false;
 }
 
-// Eggs belong in deli, not dairy. Fix legacy data on the fly.
+// Eggs belong in deli, not dairy. Cheeses always belong in dairy.
+// Fix legacy / inconsistent AI data on the fly.
+const CHEESE_PATTERN = /\b(parmesan|parmigiano|reggiano|cheddar|mozzarella|gouda|brie|camembert|feta|halloumi|haloumi|ricotta|mascarpone|gorgonzola|pecorino|gruyere|manchego|provolone|emmental|swiss|stilton|roquefort|asiago|burrata|paneer|cream cheese|cottage cheese|goat cheese|blue cheese|cheese)\b/i;
+
 function correctCategory(item, category) {
   if (!item) return category;
   const i = item.toLowerCase().trim();
-  if (/(?:^|\s)eggs?$/.test(i) && (category === "dairy" || !category)) return "deli";
+  // Eggs → deli (the AI sometimes puts them in dairy)
+  if (/(?:^|\s)eggs?$/.test(i)) return "deli";
+  // Any cheese → dairy (the AI sometimes puts hard cheeses in deli)
+  if (CHEESE_PATTERN.test(i)) return "dairy";
   return category || "dry";
 }
 
+// Common hard / aged cheeses where "X Cheese" → "X" reads more naturally
+const CHEESE_SUFFIX_DROP = /\b(parmesan|parmigiano|reggiano|cheddar|mozzarella|gouda|feta|halloumi|ricotta|mascarpone|brie|camembert|gruyere|emmental|swiss|provolone|pecorino|manchego|gorgonzola|haloumi|stilton|roquefort|asiago)\s+cheese$/i;
+
 // For the shopping list, the same ingredient prepared differently should combine.
 // E.g. "Fresh Ginger, sliced", "Fresh Ginger, julienned" → one "Ginger" entry.
-// Strips parentheticals, anything after the first comma, and a few common prefixes.
+// "Shaved Parmesan Cheese, grated" → "Parmesan".
 function normaliseIngredientForGrouping(item) {
   if (!item) return "";
   let s = String(item)
@@ -124,8 +133,12 @@ function normaliseIngredientForGrouping(item) {
     .replace(/\s*\([^)]*\)\s*/g, " ")    // drop "(scallions)" etc.
     .replace(/\s+/g, " ")
     .trim();
-  // Strip leading qualifiers that describe state, not the ingredient itself
-  s = s.replace(/^(fresh|raw|whole|finely|coarsely|roughly|large|small|medium)\s+/i, "");
+  // Strip leading prep/state qualifiers that describe how it's prepared, not the ingredient
+  s = s.replace(/^(fresh|raw|whole|finely|coarsely|roughly|large|small|medium|shaved|grated|sliced|chopped|minced|diced|crushed|ground|cooked|baked|peeled|boneless|skinless)\s+/i, "");
+  // Run prep stripping a second time in case there are two prefixes (e.g. "Finely Chopped Onion")
+  s = s.replace(/^(fresh|raw|whole|finely|coarsely|roughly|large|small|medium|shaved|grated|sliced|chopped|minced|diced|crushed|ground|cooked|baked|peeled|boneless|skinless)\s+/i, "");
+  // "Parmesan Cheese" → "Parmesan" (for the cheeses on our list)
+  s = s.replace(CHEESE_SUFFIX_DROP, (_m, name) => name);
   return s.trim();
 }
 
@@ -1370,7 +1383,17 @@ function SetupScreen({ onSetup, hasLegacyData }) {
 
 // ─── Main App ─────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState("menu");
+  // Active tab persists across refreshes so phone users don't bounce back to Menu
+  const [tab, setTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem("menu_active_tab");
+      if (saved && ["menu", "library", "list", "import"].includes(saved)) return saved;
+    } catch {}
+    return "menu";
+  });
+  useEffect(() => {
+    try { localStorage.setItem("menu_active_tab", tab); } catch {}
+  }, [tab]);
   const [library, setLibrary] = useState([]);
   const [week, setWeek] = useState(() => Object.fromEntries(DAYS.map((d) => [d, null]))); // {day: recipeId | null}
   const [shoppingList, setShoppingList] = useState([]); // [{item,category,combinedAmount,entries,checked}]
