@@ -42,7 +42,12 @@ export default async function handler(req, res) {
     return handleCustom(req, res, ANTHROPIC_KEY);
   }
 
-  // ── MODE B: URL extraction ─────────────────────────────────
+  // ── MODE B: Photo extraction (cookbook page / recipe card photos) ──
+  if (req.method === "POST" && Array.isArray(req.body?.photos) && req.body.photos.length > 0) {
+    return handlePhotos(req, res, ANTHROPIC_KEY);
+  }
+
+  // ── MODE C: URL extraction ─────────────────────────────────
   const url = req.query?.url || req.body?.url;
   if (!url) return res.status(400).json({ error: "No URL provided." });
 
@@ -548,7 +553,12 @@ Rules:
 }
 
 // ─── Shared: call Claude API ───────────────────────────────────
-async function callClaude(prompt, apiKey) {
+// `content` may be a plain prompt string or an array of content blocks (for vision).
+async function callClaude(content, apiKey) {
+  const messageContent = typeof content === "string"
+    ? content
+    : content; // array of {type:"image"|"text",...}
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -559,7 +569,7 @@ async function callClaude(prompt, apiKey) {
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: messageContent }],
     }),
   });
 
@@ -572,4 +582,61 @@ async function callClaude(prompt, apiKey) {
   const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
   if (parsed.error) throw new Error(parsed.error);
   return parsed;
+}
+
+// ─── Photo recipe handler ────────────────────────────────────
+// Accepts { photos: [base64String, ...] } where each base64 is the JPEG body
+// (no `data:image/jpeg;base64,` prefix). Sends them to Claude vision.
+async function handlePhotos(req, res, ANTHROPIC_KEY) {
+  const { photos, customName } = req.body;
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return res.status(400).json({ error: "At least one photo is required." });
+  }
+  if (photos.length > 8) {
+    return res.status(400).json({ error: "Up to 8 photos per recipe — please combine into fewer images." });
+  }
+
+  // Build vision content: all images first, then the extraction prompt.
+  const imageBlocks = photos.map((b64) => ({
+    type: "image",
+    source: { type: "base64", media_type: "image/jpeg", data: b64 },
+  }));
+
+  const prompt = `These ${photos.length} ${photos.length === 1 ? "image is" : "images are"} ${photos.length === 1 ? "a photo" : "photos (cookbook spread / sequential pages)"} of a single recipe. Read everything visible and extract the recipe.
+
+${customName ? `User-provided title hint: "${customName}". Use this if it matches what you see.\n` : ""}
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "title": "Recipe Title",
+  "cuisine": "one of: Italian/Asian/Mexican/Mediterranean/Indian/Middle Eastern/American/French/Japanese/Thai/Greek/Spanish/Other",
+  "prepTime": 15,
+  "cookTime": 30,
+  "servings": 4,
+  "skillLevel": "Easy|Medium|Advanced",
+  "ingredients": [
+    {"item": "Chicken Thighs", "amount": "600g", "category": "meat"}
+  ],
+  "method": [
+    "Step 1 text...",
+    "Step 2 text..."
+  ]
+}
+
+${CATEGORY_GUIDE}
+
+Rules:
+- ALL amounts must be metric (g, kg, ml, L). Countable items (eggs, cloves) stay as numbers.
+- If multiple images are provided, treat them as one recipe (e.g. ingredients on page 1, method on page 2).
+- "method" is an array of clear step strings. Use the printed instructions if visible. Empty array if none.
+- If you cannot read a recipe clearly, return {"error": "Couldn't read a recipe in these photos. Try a clearer shot."}`;
+
+  const visionContent = [...imageBlocks, { type: "text", text: prompt }];
+
+  try {
+    const data = await callClaude(visionContent, ANTHROPIC_KEY);
+    return res.status(200).json({ ...data, _source: "Photo" });
+  } catch (err) {
+    console.error("Photo extract failed:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
 }

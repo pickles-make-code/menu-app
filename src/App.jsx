@@ -165,11 +165,11 @@ function detectPlatform(url) {
 }
 
 function platformLabel(p) {
-  return { instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube", web: "Web", custom: "Custom" }[p] || "Link";
+  return { instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube", web: "Web", custom: "Custom", photo: "Photo" }[p] || "Link";
 }
 
 function platformIcon(p) {
-  return { instagram: "📸", tiktok: "🎵", youtube: "▶️", web: "🌐", custom: "✏️" }[p] || "🔗";
+  return { instagram: "📸", tiktok: "🎵", youtube: "▶️", web: "🌐", custom: "✏️", photo: "📷" }[p] || "🔗";
 }
 
 // Convert cooking.guru URL for a given source URL
@@ -187,6 +187,48 @@ async function fetchViaAPI(url) {
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(data.error || "Extraction failed");
   return data;
+}
+
+async function fetchRecipeFromPhotos(photosBase64, customName) {
+  const res = await fetch("/api/extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ photos: photosBase64, customName: customName || "" }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || "Could not read recipe from photos");
+  return data;
+}
+
+// Downscale + compress a File into a JPEG data URL, then strip the prefix to return base64.
+// Keeps payload small (target ~200-400KB per image) so multi-page sends fit Vercel's 4.5MB body limit.
+async function compressImageFile(file, maxDimension = 1600, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Could not decode image"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          const ratio = Math.min(maxDimension / width, maxDimension / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        const base64 = dataUrl.split(",")[1] || "";
+        resolve({ dataUrl, base64, bytes: Math.floor(base64.length * 0.75) });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 async function generateCustomRecipe(details) {
@@ -243,12 +285,37 @@ async function sget(key) {
   return _state.cache[FIELD_FOR_KEY[key]];
 }
 
-async function sset(key, val) {
+// Update cache then schedule a save. Pass { immediate: true } for critical actions
+// (list ticks, cooked toggle) so we don't risk losing them on tab hide/close.
+async function sset(key, val, opts) {
   if (!_state.code) return;
   _state.cache[FIELD_FOR_KEY[key]] = val;
-  // Debounce — many quick state updates collapse into one network save
   clearTimeout(_state.saveTimer);
-  _state.saveTimer = setTimeout(saveHousehold, 600);
+  if (opts && opts.immediate) {
+    saveHousehold();
+    return;
+  }
+  // Tight debounce — fires fast enough that a quick close still catches up,
+  // but coalesces bursts of state updates (e.g. typing in the edit textarea).
+  _state.saveTimer = setTimeout(saveHousehold, 250);
+}
+
+// Synchronously fire the pending save with keepalive so it survives a tab close / nav away.
+// Called from visibilitychange / pagehide listeners.
+function flushPendingSaves() {
+  if (!_state.code || !_state.saveTimer) return;
+  clearTimeout(_state.saveTimer);
+  _state.saveTimer = null;
+  try {
+    fetch("/api/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: _state.code, ..._state.cache }),
+      keepalive: true,
+    });
+  } catch (e) {
+    // Best-effort — nothing useful to do here
+  }
 }
 
 async function saveHousehold() {
@@ -285,8 +352,15 @@ function normalizeWeek(wk) {
   for (const d of DAYS) {
     const v = wk[d];
     if (!v) continue;
-    if (typeof v === "string") { out[d] = { id: v, mult: 1 }; continue; }
-    if (typeof v === "object" && v.id) { out[d] = { id: v.id, mult: Math.max(1, parseInt(v.mult, 10) || 1) }; continue; }
+    if (typeof v === "string") { out[d] = { id: v, mult: 1, cooked: false }; continue; }
+    if (typeof v === "object" && v.id) {
+      out[d] = {
+        id: v.id,
+        mult: Math.max(1, parseInt(v.mult, 10) || 1),
+        cooked: !!v.cooked,
+      };
+      continue;
+    }
   }
   return out;
 }
@@ -399,7 +473,7 @@ function Tag({ children }) {
 }
 
 // Recipe card (library)
-function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMenu }) {
+function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdjustQuantity, isOnMenu }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState(null);
@@ -463,13 +537,32 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, isOnMe
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
               {recipe.favourite && <span style={{ fontSize: 14 }}>⭐</span>}
+              {recipe.isFreezer && <span style={{ fontSize: 14 }}>❄</span>}
               <span style={{
                 fontFamily: "'Playfair Display', serif",
                 fontSize: 16, fontWeight: 600, color: "var(--text)",
               }}>{recipe.title}</span>
               {isOnMenu && <Badge color="var(--green)">On menu</Badge>}
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              {recipe.isFreezer && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ display: "flex", alignItems: "center", gap: 4, background: "var(--greenbg)", borderRadius: 4, padding: "2px 4px 2px 8px" }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--green)" }}>📦 {recipe.quantity || 0}</span>
+                  <button
+                    onClick={() => onAdjustQuantity && onAdjustQuantity(recipe, -1)}
+                    style={{ background: "var(--bg4)", color: "var(--text)", width: 18, height: 18, borderRadius: 3, fontSize: 12, fontWeight: 700, padding: 0, lineHeight: 1 }}
+                    title="Remove one"
+                  >−</button>
+                  <button
+                    onClick={() => onAdjustQuantity && onAdjustQuantity(recipe, +1)}
+                    style={{ background: "var(--bg4)", color: "var(--text)", width: 18, height: 18, borderRadius: 3, fontSize: 12, fontWeight: 700, padding: 0, lineHeight: 1 }}
+                    title="Add one"
+                  >+</button>
+                </div>
+              )}
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
               {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
               {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
@@ -868,14 +961,14 @@ function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClos
 // Day card for Menu tab
 // Drag is driven by Pointer Events at the App level so it works on mouse + touch.
 // `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
-function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, isDragging, isTarget }) {
+function DayCard({ day, recipe, mult = 1, cooked = false, onAdd, onRemove, onView, onToggleCooked, onDragStart, isDragging, isTarget }) {
   return (
     <div
       data-day={day}
       style={{
         background: isTarget ? "var(--accentbg)" : "var(--bg2)",
         borderRadius: "var(--radius)",
-        border: `1.5px ${isTarget ? "dashed var(--accent)" : `solid ${recipe ? "var(--border2)" : "var(--border)"}`}`,
+        border: `1.5px ${isTarget ? "dashed var(--accent)" : `solid ${cooked ? "var(--green)" : recipe ? "var(--border2)" : "var(--border)"}`}`,
         overflow: "hidden",
         transition: "border-color 0.15s, background 0.15s",
       }}>
@@ -885,8 +978,8 @@ function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, 
         borderBottom: "1px solid var(--border)",
         display: "flex", alignItems: "center", justifyContent: "space-between",
       }}>
-        <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.8px", textTransform: "uppercase", color: "var(--accent)" }}>
-          {day}
+        <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.8px", textTransform: "uppercase", color: cooked ? "var(--green)" : "var(--accent)" }}>
+          {day}{cooked && " · Cooked"}
         </span>
         {recipe && (
           <button
@@ -901,13 +994,29 @@ function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, 
           style={{
             padding: "14px 16px",
             userSelect: "none",
-            opacity: isDragging ? 0.4 : 1,
+            opacity: isDragging ? 0.4 : cooked ? 0.7 : 1,
             transition: "opacity 0.15s",
             display: "flex",
             alignItems: "flex-start",
             gap: 10,
           }}
         >
+          {/* Cooked checkbox — tick once the meal's been made */}
+          <div
+            onClick={(e) => { e.stopPropagation(); onToggleCooked && onToggleCooked(day); }}
+            title={cooked ? "Mark as not cooked" : "Mark as cooked (removes ingredients from list)"}
+            style={{
+              width: 22, height: 22, borderRadius: 6,
+              border: `2px solid ${cooked ? "var(--green)" : "var(--border2)"}`,
+              background: cooked ? "var(--green)" : "transparent",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0, cursor: "pointer",
+              transition: "all 0.15s",
+              marginTop: 1,
+            }}
+          >
+            {cooked && <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>✓</span>}
+          </div>
           {/* Drag handle — only this element captures pointer events so the rest of the card can scroll on touch */}
           <div
             onPointerDown={(e) => {
@@ -924,9 +1033,7 @@ function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, 
               lineHeight: 1,
               cursor: "grab",
               touchAction: "none",
-              padding: "4px 6px",
-              marginLeft: -6,
-              marginTop: 1,
+              padding: "4px 4px",
               userSelect: "none",
             }}
             title="Drag to swap with another day"
@@ -939,12 +1046,21 @@ function DayCard({ day, recipe, mult = 1, onAdd, onRemove, onView, onDragStart, 
             title="Tap to view full recipe"
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
-                {recipe.title}
+              <div style={{
+                fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600,
+                color: cooked ? "var(--text3)" : "var(--text)",
+                textDecoration: cooked ? "line-through" : "none",
+              }}>
+                {recipe.isFreezer && "❄ "}{recipe.title}
               </div>
               {mult > 1 && (
                 <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "var(--accentbg)", padding: "2px 7px", borderRadius: 4 }}>
                   ×{mult}
+                </span>
+              )}
+              {recipe.isFreezer && (
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--green)", background: "var(--greenbg)", padding: "2px 7px", borderRadius: 4 }}>
+                  📦 {recipe.quantity || 0}
                 </span>
               )}
             </div>
@@ -1055,11 +1171,15 @@ const labelStyle = {
 
 // ─── Import page ──────────────────────────────────────────────
 function ImportPage({ library, onImported, showBanner }) {
-  const [mode, setMode] = useState("link"); // "link" | "custom"
+  const [mode, setMode] = useState("link"); // "link" | "custom" | "freezer" | "photo"
   const [url, setUrl] = useState("");
   const [customName, setCustomName] = useState("");
   const [customIngredients, setCustomIngredients] = useState("");
   const [customMethod, setCustomMethod] = useState("");
+  const [freezerQty, setFreezerQty] = useState(1);
+  const [photos, setPhotos] = useState([]); // [{ id, dataUrl, base64, bytes }]
+  const photoLibInputRef = useRef(null);
+  const photoCamInputRef = useRef(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1129,6 +1249,87 @@ function ImportPage({ library, onImported, showBanner }) {
     setLoading(false); setStage("");
   }
 
+  async function addPhotos(fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+    if (!files.length) return;
+    if (photos.length + files.length > 8) {
+      setError("Max 8 photos per recipe — try fewer, clearer shots.");
+      return;
+    }
+    setError("");
+    try {
+      const compressed = [];
+      for (const f of files) {
+        const c = await compressImageFile(f);
+        compressed.push({ id: uid(), ...c });
+      }
+      setPhotos((prev) => [...prev, ...compressed]);
+    } catch (e) {
+      setError("Couldn't process one of the photos. Try a different image.");
+    }
+  }
+
+  function removePhoto(id) {
+    setPhotos((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  async function handlePhoto() {
+    if (!photos.length) { setError("Add at least one photo first."); return; }
+    setError(""); setLoading(true);
+    try {
+      setStage(photos.length > 1 ? `Reading ${photos.length} photos...` : "Reading the recipe...");
+      const data = await fetchRecipeFromPhotos(photos.map((p) => p.base64), customName);
+      setStage("Saving to your library...");
+      const recipe = normalizeRecipe({
+        id: uid(), sourceUrl: null, platform: "photo",
+        title: customName.trim() || data.title || "Untitled Recipe",
+        cuisine: data.cuisine || "Other",
+        prepTime: data.prepTime || 0,
+        cookTime: data.cookTime || 0,
+        servings: data.servings || 4,
+        skillLevel: data.skillLevel || "Medium",
+        ingredients: data.ingredients || [],
+        method: Array.isArray(data.method) ? data.method : [],
+        favourite: false, menuCount: 0, addedAt: Date.now(),
+      });
+      onImported(recipe);
+      setPhotos([]); setCustomName(""); setStage("");
+      showBanner(`"${recipe.title}" added to your library!`);
+    } catch (e) {
+      setError(e?.message || "Could not read recipe from these photos. Try clearer or fewer images.");
+    }
+    setLoading(false); setStage("");
+  }
+
+  async function handleFreezer() {
+    if (!customName.trim() || !customIngredients.trim()) { setError("Please enter a title and ingredients."); return; }
+    setError(""); setLoading(true);
+    try {
+      setStage("Generating recipe details...");
+      const data = await generateCustomRecipe({ title: customName, ingredients: customIngredients, method: customMethod });
+      const recipe = normalizeRecipe({
+        id: uid(), sourceUrl: null, platform: "custom",
+        title: customName.trim(),
+        cuisine: data.cuisine || "Other",
+        prepTime: data.prepTime || 0,
+        cookTime: data.cookTime || 0,
+        servings: data.servings || 4,
+        skillLevel: data.skillLevel || "Medium",
+        ingredients: data.ingredients || [],
+        method: customMethod.trim() ? customMethod.trim().split("\n").filter(Boolean) : [],
+        favourite: false, menuCount: 0, addedAt: Date.now(),
+        isFreezer: true,
+        quantity: Math.max(0, parseInt(freezerQty, 10) || 1),
+      });
+      onImported(recipe, { skipPicker: true });
+      setCustomName(""); setCustomIngredients(""); setCustomMethod(""); setFreezerQty(1); setStage("");
+      showBanner(`"${recipe.title}" added to freezer (×${recipe.quantity})`);
+    } catch (e) {
+      setError("Could not save freezer meal. Please check your inputs.");
+    }
+    setLoading(false); setStage("");
+  }
+
   return (
     <div style={{ padding: "0 0 40px" }}>
       <div style={{ marginBottom: 24 }}>
@@ -1138,10 +1339,10 @@ function ImportPage({ library, onImported, showBanner }) {
 
       {/* Mode switcher */}
       <div style={{ display: "flex", background: "var(--bg3)", borderRadius: "var(--radius2)", padding: 4, marginBottom: 24, gap: 4 }}>
-        {[["link","🔗 From Link"],["custom","✏️ Custom Recipe"]].map(([id, label]) => (
+        {[["link","🔗 Link"],["custom","✏️ Custom"],["photo","📷 Photo"],["freezer","❄ Freezer"]].map(([id, label]) => (
           <button key={id} style={{
-            flex: 1, padding: "9px", borderRadius: "var(--radius3)",
-            fontSize: 13, fontWeight: 600,
+            flex: 1, padding: "9px 4px", borderRadius: "var(--radius3)",
+            fontSize: 12, fontWeight: 600,
             background: mode === id ? "var(--accent)" : "transparent",
             color: mode === id ? "#fff" : "var(--text2)",
             transition: "all 0.2s",
@@ -1160,19 +1361,55 @@ function ImportPage({ library, onImported, showBanner }) {
               <div style={{ position: "relative", flex: 1 }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16, pointerEvents: "none" }}>🔗</span>
                 <input
-                  style={{ ...inputStyle, paddingLeft: 36 }}
+                  style={{ ...inputStyle, paddingLeft: 36, paddingRight: url ? 36 : 12 }}
                   placeholder="Recipe URL — website, YouTube, TikTok, Instagram..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !loading && handleImport()}
                   disabled={loading}
                 />
+                {url && !loading && (
+                  <button
+                    type="button"
+                    onClick={() => { setUrl(""); setError(""); }}
+                    title="Clear URL"
+                    style={{
+                      position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                      background: "var(--bg4)", color: "var(--text2)",
+                      borderRadius: "50%", width: 22, height: 22,
+                      fontSize: 13, lineHeight: 1, fontWeight: 600,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                  >✕</button>
+                )}
               </div>
             </div>
           </div>
           <div>
             <div style={labelStyle}>Custom name <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — we'll detect it)</span></div>
-            <input style={inputStyle} placeholder="e.g. Spicy Salmon Bowl" value={customName} onChange={(e) => setCustomName(e.target.value)} disabled={loading} />
+            <div style={{ position: "relative" }}>
+              <input
+                style={{ ...inputStyle, paddingRight: customName ? 36 : 12 }}
+                placeholder="e.g. Spicy Salmon Bowl"
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                disabled={loading}
+              />
+              {customName && !loading && (
+                <button
+                  type="button"
+                  onClick={() => setCustomName("")}
+                  title="Clear"
+                  style={{
+                    position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                    background: "var(--bg4)", color: "var(--text2)",
+                    borderRadius: "50%", width: 22, height: 22,
+                    fontSize: 13, lineHeight: 1, fontWeight: 600,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >✕</button>
+              )}
+            </div>
           </div>
 
           <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
@@ -1250,6 +1487,203 @@ function ImportPage({ library, onImported, showBanner }) {
             disabled={loading || !customName.trim() || !customIngredients.trim()}
           >
             {loading ? <><Spinner size={15} /> Saving recipe...</> : "Save to library →"}
+          </button>
+        </div>
+      )}
+
+      {/* Photo */}
+      {mode === "photo" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>📷 Photo recipes:</span> Snap or pick photos of a cookbook spread, recipe card, or handwritten note. Add multiple pages if needed — we'll read them as one recipe.
+          </div>
+
+          {/* Hidden inputs — triggered by the visible buttons below */}
+          <input
+            ref={photoLibInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }}
+          />
+          <input
+            ref={photoCamInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }}
+          />
+
+          {/* Picker buttons */}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => photoCamInputRef.current?.click()}
+              disabled={loading}
+              style={{ ...btnStyle, flex: 1, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+            >📷 Take Photo</button>
+            <button
+              type="button"
+              onClick={() => photoLibInputRef.current?.click()}
+              disabled={loading}
+              style={{ ...btnStyle, flex: 1, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+            >🖼 From Library</button>
+          </div>
+
+          {/* Selected thumbnails */}
+          {photos.length > 0 && (
+            <div>
+              <div style={{ ...labelStyle, marginBottom: 8 }}>
+                {photos.length} photo{photos.length !== 1 ? "s" : ""} selected
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: 8 }}>
+                {photos.map((p, i) => (
+                  <div key={p.id} style={{ position: "relative", aspectRatio: "1", borderRadius: "var(--radius3)", overflow: "hidden", background: "var(--bg3)", border: "1.5px solid var(--border2)" }}>
+                    <img src={p.dataUrl} alt={`Photo ${i + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                    <div style={{ position: "absolute", top: 4, left: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>{i + 1}</div>
+                    <button
+                      type="button"
+                      onClick={() => removePhoto(p.id)}
+                      disabled={loading}
+                      title="Remove photo"
+                      style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.7)", color: "#fff", borderRadius: "50%", width: 22, height: 22, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}
+                    >✕</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {photos.length > 0 && (
+            <div>
+              <div style={labelStyle}>Custom name <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — we'll detect it)</span></div>
+              <div style={{ position: "relative" }}>
+                <input
+                  style={{ ...inputStyle, paddingRight: customName ? 36 : 12 }}
+                  placeholder="e.g. Nan's Lasagne"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  disabled={loading}
+                />
+                {customName && !loading && (
+                  <button
+                    type="button"
+                    onClick={() => setCustomName("")}
+                    title="Clear"
+                    style={{
+                      position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                      background: "var(--bg4)", color: "var(--text2)",
+                      borderRadius: "50%", width: 22, height: 22,
+                      fontSize: 13, lineHeight: 1, fontWeight: 600,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                  >✕</button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", background: "var(--accentbg)", borderRadius: "var(--radius2)", border: "1px solid var(--border2)" }}>
+              <Spinner />
+              <span style={{ fontSize: 13, color: "var(--accent2)" }}>{stage}</span>
+            </div>
+          )}
+          {error && <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{error}</div>}
+
+          <button
+            style={{
+              ...btnStyle, background: loading || !photos.length ? "var(--bg4)" : "var(--accent)",
+              color: loading || !photos.length ? "var(--text3)" : "#fff",
+              cursor: loading || !photos.length ? "not-allowed" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}
+            onClick={handlePhoto}
+            disabled={loading || !photos.length}
+          >
+            {loading ? <><Spinner size={15} /> Reading photos...</> : "Extract & save recipe →"}
+          </button>
+        </div>
+      )}
+
+      {/* Freezer meal */}
+      {mode === "freezer" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>❄ Freezer meals</span> are batch-cooked dishes already in your freezer. Track how many you have, and adding one to the menu won't put its ingredients on the shopping list — ticking it as cooked deducts one from your stock.
+          </div>
+          <div>
+            <div style={labelStyle}>Meal name *</div>
+            <input style={inputStyle} placeholder="e.g. Beef Bolognese" value={customName} onChange={(e) => setCustomName(e.target.value)} disabled={loading} />
+          </div>
+          <div>
+            <div style={labelStyle}>How many in freezer *</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text)", padding: "8px 16px", fontSize: 18, fontWeight: 700 }}
+                onClick={() => setFreezerQty((q) => Math.max(0, (parseInt(q, 10) || 0) - 1))}
+                disabled={loading}
+                type="button"
+              >−</button>
+              <input
+                type="number"
+                min="0"
+                style={{ ...inputStyle, width: 70, textAlign: "center", fontWeight: 600, fontSize: 16 }}
+                value={freezerQty}
+                onChange={(e) => setFreezerQty(e.target.value)}
+                disabled={loading}
+              />
+              <button
+                style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text)", padding: "8px 16px", fontSize: 18, fontWeight: 700 }}
+                onClick={() => setFreezerQty((q) => (parseInt(q, 10) || 0) + 1)}
+                disabled={loading}
+                type="button"
+              >+</button>
+              <span style={{ fontSize: 13, color: "var(--text3)" }}>portions</span>
+            </div>
+          </div>
+          <div>
+            <div style={labelStyle}>Ingredients * <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(used for the recipe view, not the shopping list)</span></div>
+            <textarea
+              style={{ ...inputStyle, minHeight: 120, resize: "vertical", lineHeight: 1.7 }}
+              placeholder={"500g beef mince\n1 onion\n2 garlic cloves\n400g tinned tomatoes\n300g spaghetti"}
+              value={customIngredients}
+              onChange={(e) => setCustomIngredients(e.target.value)}
+              disabled={loading}
+            />
+          </div>
+          <div>
+            <div style={labelStyle}>Method <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — e.g. reheating instructions)</span></div>
+            <textarea
+              style={{ ...inputStyle, minHeight: 80, resize: "vertical", lineHeight: 1.7 }}
+              placeholder={"Defrost overnight in the fridge\nReheat in pan over medium heat for 8 mins, stirring occasionally..."}
+              value={customMethod}
+              onChange={(e) => setCustomMethod(e.target.value)}
+              disabled={loading}
+            />
+          </div>
+
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", background: "var(--accentbg)", borderRadius: "var(--radius2)", border: "1px solid var(--border2)" }}>
+              <Spinner />
+              <span style={{ fontSize: 13, color: "var(--accent2)" }}>{stage}</span>
+            </div>
+          )}
+          {error && <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{error}</div>}
+
+          <button
+            style={{
+              ...btnStyle, background: loading || !customName.trim() || !customIngredients.trim() ? "var(--bg4)" : "var(--accent)",
+              color: loading || !customName.trim() || !customIngredients.trim() ? "var(--text3)" : "#fff",
+              cursor: loading || !customName.trim() || !customIngredients.trim() ? "not-allowed" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}
+            onClick={handleFreezer}
+            disabled={loading || !customName.trim() || !customIngredients.trim()}
+          >
+            {loading ? <><Spinner size={15} /> Saving freezer meal...</> : "❄ Save to freezer →"}
           </button>
         </div>
       )}
@@ -1407,6 +1841,7 @@ export default function App() {
 
   // Menu: recipe picker modal
   const [pickerDay, setPickerDay] = useState(null); // day string or null
+  const [pickerSearch, setPickerSearch] = useState("");
 
   // List: breakdown toggle per item
   const [expandedItems, setExpandedItems] = useState({});
@@ -1484,10 +1919,25 @@ export default function App() {
   }, [householdCode]);
 
   const saveLibrary = useCallback(async (lib) => { await sset(SK.library, lib); }, []);
-  const saveWeek = useCallback(async (wk) => { await sset(SK.menu, wk); }, []);
-  const saveList = useCallback(async (sl) => { await sset(SK.list, sl); }, []);
+  const saveWeek = useCallback(async (wk, opts) => { await sset(SK.menu, wk, opts); }, []);
+  const saveList = useCallback(async (sl, opts) => { await sset(SK.list, sl, opts); }, []);
   const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
   const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
+
+  // Flush any pending debounced save when the tab is hidden or the page is unloaded.
+  // Without this, a tick + immediate close (common on mobile) can lose the save.
+  useEffect(() => {
+    function onHide() {
+      if (document.visibilityState === "hidden") flushPendingSaves();
+    }
+    function onPageHide() { flushPendingSaves(); }
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, []);
 
   // Cleaning / Pharmacy CRUD — used by the extra sections at the bottom of the List tab.
   async function addExtraItem(category, text) {
@@ -1585,6 +2035,29 @@ export default function App() {
     rebuildShoppingList(newWeek, library);
   }
 
+  // Tick a day as "cooked". Removes its unchecked ingredients from the shopping list
+  // (rebuildShoppingList excludes cooked recipes from the auto list, and already-checked
+  // items are preserved as "stuck" so the user keeps their purchase history).
+  // If the recipe is a freezer meal, decrement its quantity by 1 (and bump it back up on un-tick).
+  async function toggleCookedDay(day) {
+    const entry = week[day];
+    if (!entry) return;
+    const cooked = !entry.cooked;
+    const newWeek = { ...week, [day]: { ...entry, cooked } };
+    setWeek(newWeek);
+    await saveWeek(newWeek, { immediate: true });
+    let lib = library;
+    const recipe = library.find((r) => r.id === entry.id);
+    if (recipe && recipe.isFreezer) {
+      const delta = cooked ? -1 : 1;
+      const nextQty = Math.max(0, (recipe.quantity || 0) + delta);
+      lib = library.map((r) => r.id === recipe.id ? { ...r, quantity: nextQty } : r);
+      setLibrary(lib);
+      await saveLibrary(lib);
+    }
+    rebuildShoppingList(newWeek, lib);
+  }
+
   // Swap (or move) the recipe between two days
   async function swapDays(fromDay, toDay) {
     if (fromDay === toDay) return;
@@ -1634,18 +2107,26 @@ export default function App() {
   }, [dragSource]); // intentionally only re-bind when source changes
 
   function rebuildShoppingList(wk, lib) {
+    // Exclude cooked days and freezer recipes — freezer meals are pre-made (no shopping needed),
+    // cooked recipes are off the to-buy list (user marked them as done).
     const items = DAYS
       .map((d) => wk[d])
-      .filter(Boolean)
+      .filter((entry) => entry && !entry.cooked)
       .map((entry) => ({ recipe: lib.find((r) => r.id === entry.id), mult: entry.mult || 1 }))
-      .filter((x) => x.recipe);
+      .filter((x) => x.recipe && !x.recipe.isFreezer);
     const auto = buildShoppingList(items).map((item) => {
-      const existing = shoppingList.find((i) => !i.manual && i.item.toLowerCase() === item.item.toLowerCase());
+      const existing = shoppingList.find((i) => i.item.toLowerCase() === item.item.toLowerCase());
       return { ...item, checked: existing?.checked || false };
     });
-    // Preserve manually-added items (the ones added via the + button on a category)
+    // Preserve manually-added items
     const manual = shoppingList.filter((i) => i.manual);
-    const list = [...auto, ...manual];
+    // Preserve previously-auto items that are checked but no longer appear in the new auto list.
+    // Without this, ticking "cooked" or removing a recipe would erase the user's purchase history.
+    const autoKeys = new Set(auto.map((i) => i.item.toLowerCase()));
+    const stuck = shoppingList.filter(
+      (i) => !i.manual && i.checked && !autoKeys.has(i.item.toLowerCase())
+    ).map((i) => ({ ...i, stuck: true })); // tag so we can identify these later if needed
+    const list = [...auto, ...stuck, ...manual];
     setShoppingList(list);
     saveList(list);
   }
@@ -1677,13 +2158,17 @@ export default function App() {
 
   async function toggleListItem(idx) {
     const updated = shoppingList.map((item, i) => i === idx ? { ...item, checked: !item.checked } : item);
-    setShoppingList(updated); await saveList(updated);
+    setShoppingList(updated);
+    // Save immediately — losing a tick because a debounce was mid-flight is the bug being fixed here.
+    await saveList(updated, { immediate: true });
   }
 
   // ── Handle new import ──
-  async function handleImported(recipe) {
+  async function handleImported(recipe, opts = {}) {
     await addToLibrary(recipe);
-    // Prompt: add to menu?
+    // Freezer meals don't get the "add to this week's menu" prompt — you add them
+    // to a day when you actually want to eat one.
+    if (opts.skipPicker) return;
     setPickerDay("__new__");
     setPendingRecipe(recipe);
   }
@@ -1694,12 +2179,22 @@ export default function App() {
   const recipeById = (id) => library.find((r) => r.id === id);
   const menuRecipeIds = new Set(DAYS.map((d) => week[d]?.id).filter(Boolean));
 
+  function recipeMatchesQuery(r, q) {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    if ((r.title || "").toLowerCase().includes(needle)) return true;
+    if ((r.cuisine || "").toLowerCase().includes(needle)) return true;
+    if ((r.skillLevel || "").toLowerCase().includes(needle)) return true;
+    if (Array.isArray(r.ingredients) && r.ingredients.some((ing) => (ing.item || "").toLowerCase().includes(needle))) return true;
+    return false;
+  }
+
   const libFiltered = library.filter((r) => {
-    const matchSearch = !libSearch || r.title.toLowerCase().includes(libSearch.toLowerCase());
-    if (!matchSearch) return false;
+    if (!recipeMatchesQuery(r, libSearch)) return false;
     if (libSection === "favourites") return r.favourite;
-    if (libSection === "all") return true;
-    return r.cuisine === libSection;
+    if (libSection === "freezer") return r.isFreezer;
+    if (libSection === "all") return !r.isFreezer; // hide freezer from "All" — they have their own chip
+    return r.cuisine === libSection && !r.isFreezer;
   });
 
   const usedCuisines = [...new Set(library.map((r) => r.cuisine).filter(Boolean))];
@@ -1848,7 +2343,7 @@ export default function App() {
           <div style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 300,
             display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
-          }} onClick={() => { setPickerDay(null); setPendingMult(1); }}>
+          }} onClick={() => { setPickerDay(null); setPendingMult(1); setPickerSearch(""); }}>
             <div style={{
               background: "var(--bg2)", borderRadius: "var(--radius)", padding: 20,
               width: "100%", maxWidth: 420, maxHeight: "80vh", overflow: "hidden",
@@ -1859,7 +2354,7 @@ export default function App() {
                   <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 17, fontWeight: 600 }}>Pick a recipe</div>
                   <div style={{ fontSize: 12, color: "var(--accent)", marginTop: 2 }}>{pickerDay}</div>
                 </div>
-                <button style={{ background: "none", fontSize: 18, color: "var(--text3)", padding: 4 }} onClick={() => { setPickerDay(null); setPendingMult(1); }}>✕</button>
+                <button style={{ background: "none", fontSize: 18, color: "var(--text3)", padding: 4 }} onClick={() => { setPickerDay(null); setPendingMult(1); setPickerSearch(""); }}>✕</button>
               </div>
               {library.length === 0 ? (
                 <div style={{ fontSize: 13, color: "var(--text2)", textAlign: "center", padding: "30px 0" }}>
@@ -1867,31 +2362,72 @@ export default function App() {
                   <span style={{ color: "var(--accent)" }}>Go to Import to add one.</span>
                 </div>
               ) : (
-                <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-                  {library.map((r) => {
-                    const onDays = Object.entries(week)
-                      .filter(([d, entry]) => entry?.id === r.id && d !== pickerDay)
-                      .map(([d]) => d);
-                    return (
-                      <div key={r.id} style={{
-                        padding: "12px 14px", borderRadius: "var(--radius3)",
-                        background: "var(--bg3)",
-                        border: `1.5px solid ${week[pickerDay]?.id === r.id ? "var(--accent)" : "var(--border)"}`,
-                        cursor: "pointer", transition: "border-color 0.15s",
-                      }} onClick={() => assignDay(pickerDay, r.id, pendingMult)}>
-                        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{r.title}</div>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {r.cuisine && <Tag>{r.cuisine}</Tag>}
-                          {((r.prepTime || 0) + (r.cookTime || 0)) > 0 && <Tag>⏱ {(r.prepTime || 0) + (r.cookTime || 0)} min</Tag>}
-                          {r.skillLevel && <Tag>{r.skillLevel}</Tag>}
-                          {onDays.length > 0 && (
-                            <Tag>📅 already on {onDays.map((d) => d.slice(0, 3)).join(", ")}</Tag>
-                          )}
+                <>
+                  <div style={{ position: "relative", marginBottom: 12 }}>
+                    <input
+                      style={{ ...inputStyle, paddingRight: pickerSearch ? 36 : 12 }}
+                      placeholder="Search title, cuisine or ingredient..."
+                      value={pickerSearch}
+                      onChange={(e) => setPickerSearch(e.target.value)}
+                      autoFocus
+                    />
+                    {pickerSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setPickerSearch("")}
+                        style={{
+                          position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                          background: "var(--bg4)", color: "var(--text2)",
+                          borderRadius: "50%", width: 22, height: 22,
+                          fontSize: 13, lineHeight: 1, fontWeight: 600,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}
+                      >✕</button>
+                    )}
+                  </div>
+                  {(() => {
+                    const filtered = library.filter((r) => recipeMatchesQuery(r, pickerSearch));
+                    if (filtered.length === 0) {
+                      return (
+                        <div style={{ fontSize: 13, color: "var(--text2)", textAlign: "center", padding: "20px 0" }}>
+                          No recipes match "{pickerSearch}"
                         </div>
+                      );
+                    }
+                    return (
+                      <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+                        {filtered.map((r) => {
+                          const onDays = Object.entries(week)
+                            .filter(([d, entry]) => entry?.id === r.id && d !== pickerDay)
+                            .map(([d]) => d);
+                          const outOfStock = r.isFreezer && (r.quantity || 0) <= 0;
+                          return (
+                            <div key={r.id} style={{
+                              padding: "12px 14px", borderRadius: "var(--radius3)",
+                              background: "var(--bg3)",
+                              border: `1.5px solid ${week[pickerDay]?.id === r.id ? "var(--accent)" : "var(--border)"}`,
+                              cursor: "pointer", transition: "border-color 0.15s",
+                              opacity: outOfStock ? 0.55 : 1,
+                            }} onClick={() => { assignDay(pickerDay, r.id, pendingMult); setPickerSearch(""); }}>
+                              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                                {r.isFreezer && "❄ "}{r.title}
+                              </div>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                {r.isFreezer && <Tag>📦 {r.quantity || 0} in freezer</Tag>}
+                                {r.cuisine && <Tag>{r.cuisine}</Tag>}
+                                {((r.prepTime || 0) + (r.cookTime || 0)) > 0 && <Tag>⏱ {(r.prepTime || 0) + (r.cookTime || 0)} min</Tag>}
+                                {r.skillLevel && <Tag>{r.skillLevel}</Tag>}
+                                {onDays.length > 0 && (
+                                  <Tag>📅 already on {onDays.map((d) => d.slice(0, 3)).join(", ")}</Tag>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     );
-                  })}
-                </div>
+                  })()}
+                </>
               )}
             </div>
           </div>
@@ -1916,9 +2452,11 @@ export default function App() {
                     day={day}
                     recipe={week[day] ? recipeById(week[day].id) : null}
                     mult={week[day]?.mult || 1}
+                    cooked={!!week[day]?.cooked}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
                     onView={(d) => setViewingDay(d)}
+                    onToggleCooked={toggleCookedDay}
                     onDragStart={startDayDrag}
                     isDragging={dragSource === day}
                     isTarget={dragTarget === day && dragSource !== day}
@@ -1974,18 +2512,24 @@ export default function App() {
               {/* Section tabs */}
               {library.length > 0 && (
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-                  {["all", "favourites", ...usedCuisines].map((s) => (
-                    <button key={s} style={{
-                      padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600,
-                      background: libSection === s ? "var(--accent)" : "var(--bg3)",
-                      color: libSection === s ? "#fff" : "var(--text2)",
-                      border: `1.5px solid ${libSection === s ? "var(--accent)" : "var(--border)"}`,
-                      textTransform: s === "all" || s === "favourites" ? "capitalize" : "none",
-                      transition: "all 0.15s",
-                    }} onClick={() => setLibSection(s)}>
-                      {s === "favourites" ? "⭐ Favourites" : s === "all" ? "All" : s}
-                    </button>
-                  ))}
+                  {(() => {
+                    const hasFreezer = library.some((r) => r.isFreezer);
+                    const chips = ["all", "favourites"];
+                    if (hasFreezer) chips.push("freezer");
+                    chips.push(...usedCuisines);
+                    return chips.map((s) => (
+                      <button key={s} style={{
+                        padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600,
+                        background: libSection === s ? "var(--accent)" : "var(--bg3)",
+                        color: libSection === s ? "#fff" : "var(--text2)",
+                        border: `1.5px solid ${libSection === s ? "var(--accent)" : "var(--border)"}`,
+                        textTransform: ["all", "favourites", "freezer"].includes(s) ? "capitalize" : "none",
+                        transition: "all 0.15s",
+                      }} onClick={() => setLibSection(s)}>
+                        {s === "favourites" ? "⭐ Favourites" : s === "freezer" ? "❄ Freezer" : s === "all" ? "All" : s}
+                      </button>
+                    ));
+                  })()}
                 </div>
               )}
 
@@ -2000,6 +2544,10 @@ export default function App() {
                     onToggleFav={toggleFav}
                     onDelete={deleteRecipe}
                     onEdit={updateRecipe}
+                    onAdjustQuantity={(recipe, delta) => {
+                      const next = Math.max(0, (recipe.quantity || 0) + delta);
+                      updateRecipe({ ...recipe, quantity: next });
+                    }}
                   />
                 ))}
               </div>
@@ -2039,7 +2587,7 @@ export default function App() {
                   <button style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text2)", padding: "7px 14px", fontSize: 12 }}
                     onClick={async () => {
                       const updated = shoppingList.filter((i) => !i.checked);
-                      setShoppingList(updated); await saveList(updated);
+                      setShoppingList(updated); await saveList(updated, { immediate: true });
                     }}>
                     Clear checked ({checkedCount})
                   </button>
@@ -2172,5 +2720,5 @@ export default function App() {
 }
 
 function platformColor(p) {
-  return { instagram: "#E1306C", tiktok: "#69C9D0", youtube: "#FF0000", custom: "var(--accent)" }[p] || "var(--text2)";
+  return { instagram: "#E1306C", tiktok: "#69C9D0", youtube: "#FF0000", custom: "var(--accent)", photo: "var(--green)" }[p] || "var(--text2)";
 }
