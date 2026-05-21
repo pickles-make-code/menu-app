@@ -2289,9 +2289,11 @@ export default function App() {
     if (!recipeMatchesQuery(r, libSearch)) return false;
     if (libSection === "favourites") return r.favourite;
     if (libSection === "freezer") return r.isFreezer;
-    if (libSection === "all") return !r.isFreezer; // hide freezer from "All" — they have their own chip
-    return r.cuisine === libSection && !r.isFreezer;
+    if (libSection === "all") return true;
+    return r.cuisine === libSection;
   });
+
+  const freezerInventory = library.filter((r) => r.isFreezer);
 
   const usedCuisines = [...new Set(library.map((r) => r.cuisine).filter(Boolean))];
   const whatsNew = [...library].sort((a, b) => b.addedAt - a.addedAt).slice(0, 5);
@@ -2601,6 +2603,61 @@ export default function App() {
                         {r.cuisine && <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4 }}>{r.cuisine}</div>}
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Freezer inventory — quick at-a-glance with +/- adjusters per meal */}
+              {!libSearch && freezerInventory.length > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px" }}>
+                      ❄ Freezer Inventory
+                    </div>
+                    <button
+                      onClick={() => setLibSection("freezer")}
+                      style={{ background: "none", color: "var(--text3)", fontSize: 11, padding: "2px 4px" }}
+                      title="Filter library to freezer meals"
+                    >View all →</button>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
+                    {freezerInventory.map((r) => {
+                      const qty = r.quantity || 0;
+                      const out = qty <= 0;
+                      return (
+                        <div key={r.id} style={{
+                          flexShrink: 0, width: 170, background: "var(--bg3)",
+                          borderRadius: "var(--radius2)", padding: "12px 14px",
+                          border: `1.5px solid ${out ? "var(--border)" : "var(--greenbg)"}`,
+                          display: "flex", flexDirection: "column", gap: 8,
+                        }}>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                            <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, color: out ? "var(--text3)" : "var(--green)" }}>
+                              {qty}
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.6px" }}>
+                              {out ? "out of stock" : qty === 1 ? "portion" : "portions"}
+                            </div>
+                          </div>
+                          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: "var(--text)", minHeight: 34 }}>
+                            ❄ {r.title}
+                          </div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button
+                              onClick={() => updateRecipe({ ...r, quantity: Math.max(0, qty - 1) })}
+                              style={{ flex: 1, background: "var(--bg4)", color: "var(--text)", borderRadius: 6, padding: "5px", fontSize: 14, fontWeight: 700 }}
+                              title="Remove one"
+                              disabled={qty === 0}
+                            >−</button>
+                            <button
+                              onClick={() => updateRecipe({ ...r, quantity: qty + 1 })}
+                              style={{ flex: 1, background: "var(--bg4)", color: "var(--text)", borderRadius: 6, padding: "5px", fontSize: 14, fontWeight: 700 }}
+                              title="Add one"
+                            >+</button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
