@@ -473,7 +473,7 @@ function Tag({ children }) {
 }
 
 // Recipe card (library)
-function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdjustQuantity, isOnMenu }) {
+function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onToggleMine, onDelete, onEdit, onAdjustQuantity, isOnMenu }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState(null);
@@ -487,6 +487,8 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdju
       skillLevel: recipe.skillLevel,
       prepTime: recipe.prepTime,
       cookTime: recipe.cookTime,
+      madeIt: !!recipe.madeIt,
+      mine: !!recipe.mine,
       ingredients: recipe.ingredients.map((i) => ({ ...i })),
       // Raw text for the textareas — only parsed on save so typing/Enter behave normally
       ingredientsText: recipe.ingredients
@@ -563,6 +565,8 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdju
                   >+</button>
                 </div>
               )}
+              {recipe.mine && <Badge color="var(--accent)">✍ Mine</Badge>}
+              {recipe.madeIt && <Badge color="var(--green)">🍳 Made</Badge>}
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
               {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
               {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
@@ -570,12 +574,22 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdju
           </div>
 
           {/* Action icons */}
-          <div style={{ display: "flex", gap: 8, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
             <button
               style={{ background: "none", fontSize: 16, padding: 4, color: recipe.favourite ? "#f5c842" : "var(--text3)", transition: "color 0.2s" }}
               onClick={() => onToggleFav(recipe.id)}
               title={recipe.favourite ? "Remove from favourites" : "Add to favourites"}
             >★</button>
+            <button
+              style={{ background: "none", fontSize: 15, padding: 4, color: recipe.madeIt ? "var(--green)" : "var(--text3)", transition: "color 0.2s" }}
+              onClick={() => onToggleMade && onToggleMade(recipe.id)}
+              title={recipe.madeIt ? "Made it (tap to unmark)" : "Mark as made"}
+            >🍳</button>
+            <button
+              style={{ background: "none", fontSize: 14, padding: 4, color: recipe.mine ? "var(--accent)" : "var(--text3)", transition: "color 0.2s" }}
+              onClick={() => onToggleMine && onToggleMine(recipe.id)}
+              title={recipe.mine ? "My recipe (tap to unmark)" : "Mark as my recipe"}
+            >✍</button>
             <button
               style={{ background: "none", fontSize: 15, padding: 4, color: "var(--text3)", transition: "color 0.2s" }}
               onClick={startEdit}
@@ -625,6 +639,27 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onDelete, onEdit, onAdju
                 <input type="number" style={{ ...inputStyle, width: "50%", padding: "9px 10px" }} value={editData.cookTime} onChange={(e) => setEditData({ ...editData, cookTime: +e.target.value })} />
               </div>
             </div>
+          </div>
+          {/* Made-it + Mine toggles — handy for backfilling old recipes */}
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", margin: "4px 0 12px" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text2)", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={!!editData.madeIt}
+                onChange={(e) => setEditData({ ...editData, madeIt: e.target.checked })}
+                style={{ width: 16, height: 16, accentColor: "var(--green)" }}
+              />
+              🍳 I've made this
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text2)", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={!!editData.mine}
+                onChange={(e) => setEditData({ ...editData, mine: e.target.checked })}
+                style={{ width: 16, height: 16, accentColor: "var(--accent)" }}
+              />
+              ✍ My recipe
+            </label>
           </div>
           <div style={labelStyle}>Ingredients (one per line: "amount item, category")</div>
           <textarea
@@ -2006,6 +2041,16 @@ export default function App() {
     setLibrary(lib); await saveLibrary(lib);
   }
 
+  async function toggleMade(id) {
+    const lib = library.map((r) => r.id === id ? { ...r, madeIt: !r.madeIt } : r);
+    setLibrary(lib); await saveLibrary(lib);
+  }
+
+  async function toggleMine(id) {
+    const lib = library.map((r) => r.id === id ? { ...r, mine: !r.mine } : r);
+    setLibrary(lib); await saveLibrary(lib);
+  }
+
   // ── Week / menu ops ──
   async function assignDay(day, recipeId, mult = 1) {
     const newWeek = { ...week, [day]: { id: recipeId, mult: Math.max(1, mult || 1) } };
@@ -2048,12 +2093,21 @@ export default function App() {
     await saveWeek(newWeek, { immediate: true });
     let lib = library;
     const recipe = library.find((r) => r.id === entry.id);
-    if (recipe && recipe.isFreezer) {
-      const delta = cooked ? -1 : 1;
-      const nextQty = Math.max(0, (recipe.quantity || 0) + delta);
-      lib = library.map((r) => r.id === recipe.id ? { ...r, quantity: nextQty } : r);
-      setLibrary(lib);
-      await saveLibrary(lib);
+    // Cooking a recipe on the Menu auto-flags it as madeIt in the library.
+    // Untick doesn't reverse it — once you've made it, you've made it.
+    // Freezer recipes also get their portion count decremented (or restored on untick).
+    if (recipe) {
+      const patches = {};
+      if (cooked && !recipe.madeIt) patches.madeIt = true;
+      if (recipe.isFreezer) {
+        const delta = cooked ? -1 : 1;
+        patches.quantity = Math.max(0, (recipe.quantity || 0) + delta);
+      }
+      if (Object.keys(patches).length) {
+        lib = library.map((r) => r.id === recipe.id ? { ...r, ...patches } : r);
+        setLibrary(lib);
+        await saveLibrary(lib);
+      }
     }
     rebuildShoppingList(newWeek, lib);
   }
@@ -2542,6 +2596,8 @@ export default function App() {
                     isOnMenu={menuRecipeIds.has(r.id)}
                     onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
                     onToggleFav={toggleFav}
+                    onToggleMade={toggleMade}
+                    onToggleMine={toggleMine}
                     onDelete={deleteRecipe}
                     onEdit={updateRecipe}
                     onAdjustQuantity={(recipe, delta) => {
