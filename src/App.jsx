@@ -473,7 +473,9 @@ function Tag({ children }) {
 }
 
 // Recipe card (library)
-function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onToggleMine, onDelete, onEdit, onAdjustQuantity, isOnMenu }) {
+function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, onEdit, onAdjustQuantity, isOnMenu }) {
+  const [freezerQty, setFreezerQty] = useState(1);
+  const [showFreezerInput, setShowFreezerInput] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState(null);
@@ -586,11 +588,6 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onToggleMi
               title={recipe.madeIt ? "Made it (tap to unmark)" : "Mark as made"}
             >🍳</button>
             <button
-              style={{ background: "none", fontSize: 14, padding: 4, color: recipe.mine ? "var(--accent)" : "var(--text3)", transition: "color 0.2s" }}
-              onClick={() => onToggleMine && onToggleMine(recipe.id)}
-              title={recipe.mine ? "My recipe (tap to unmark)" : "Mark as my recipe"}
-            >✍</button>
-            <button
               style={{ background: "none", fontSize: 15, padding: 4, color: "var(--text3)", transition: "color 0.2s" }}
               onClick={startEdit}
               title="Edit recipe"
@@ -701,6 +698,56 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onToggleMi
               ))}
             </div>
           </div>
+
+          {/* Add to freezer — only shown for non-freezer recipes.
+              Converts this recipe into a freezer meal with N portions. */}
+          {!recipe.isFreezer && (
+            <div style={{ paddingBottom: 12 }}>
+              {!showFreezerInput ? (
+                <button
+                  style={{ ...btnStyle, background: "var(--bg3)", color: "var(--green)", border: "1.5px solid var(--border2)", width: "100%", fontSize: 12, padding: "8px 12px" }}
+                  onClick={(e) => { e.stopPropagation(); setShowFreezerInput(true); }}
+                >❄ Add to freezer meals</button>
+              ) : (
+                <div style={{ background: "var(--bg3)", borderRadius: "var(--radius3)", border: "1px solid var(--border)", padding: "10px 12px" }}>
+                  <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 8 }}>
+                    How many portions in the freezer?
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button
+                      style={{ background: "var(--bg4)", color: "var(--text)", width: 28, height: 28, borderRadius: 6, fontSize: 16, fontWeight: 700, padding: 0 }}
+                      onClick={(e) => { e.stopPropagation(); setFreezerQty((q) => Math.max(1, q - 1)); }}
+                    >−</button>
+                    <input
+                      type="number"
+                      min="1"
+                      value={freezerQty}
+                      onChange={(e) => setFreezerQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ ...inputStyle, width: 56, textAlign: "center", padding: "5px 8px", fontWeight: 600 }}
+                    />
+                    <button
+                      style={{ background: "var(--bg4)", color: "var(--text)", width: 28, height: 28, borderRadius: 6, fontSize: 16, fontWeight: 700, padding: 0 }}
+                      onClick={(e) => { e.stopPropagation(); setFreezerQty((q) => q + 1); }}
+                    >+</button>
+                    <button
+                      style={{ ...btnStyle, background: "var(--green)", color: "#fff", flex: 1, fontSize: 12, padding: "7px 12px", marginLeft: 4 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEdit({ ...recipe, isFreezer: true, quantity: freezerQty });
+                        setShowFreezerInput(false);
+                        setFreezerQty(1);
+                      }}
+                    >❄ Save</button>
+                    <button
+                      style={{ background: "none", color: "var(--text3)", fontSize: 14, padding: "4px 8px" }}
+                      onClick={(e) => { e.stopPropagation(); setShowFreezerInput(false); setFreezerQty(1); }}
+                    >✕</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Ingredients */}
           <div style={{ marginBottom: 12 }}>
@@ -2046,11 +2093,6 @@ export default function App() {
     setLibrary(lib); await saveLibrary(lib);
   }
 
-  async function toggleMine(id) {
-    const lib = library.map((r) => r.id === id ? { ...r, mine: !r.mine } : r);
-    setLibrary(lib); await saveLibrary(lib);
-  }
-
   // ── Week / menu ops ──
   async function assignDay(day, recipeId, mult = 1) {
     const newWeek = { ...week, [day]: { id: recipeId, mult: Math.max(1, mult || 1) } };
@@ -2597,7 +2639,6 @@ export default function App() {
                     onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
                     onToggleFav={toggleFav}
                     onToggleMade={toggleMade}
-                    onToggleMine={toggleMine}
                     onDelete={deleteRecipe}
                     onEdit={updateRecipe}
                     onAdjustQuantity={(recipe, delta) => {
