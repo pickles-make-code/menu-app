@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import JSZip from "jszip";
 
 // ─── Storage keys ─────────────────────────────────────────────
 const SK = {
@@ -7,6 +8,7 @@ const SK = {
   list: "menu_list_v2",
   cleaning: "menu_cleaning_v1",
   pharmacy: "menu_pharmacy_v1",
+  books: "menu_books_v1",
 };
 
 // ─── Constants ────────────────────────────────────────────────
@@ -231,6 +233,162 @@ async function compressImageFile(file, maxDimension = 1600, quality = 0.82) {
   });
 }
 
+// ─── EPUB parsing (client-side) ─────────────────────────────────
+// EPUBs are ZIP files of XHTML. We pull the spine, extract plain text per file,
+// and return chunks (~80KB each) so we can feed Claude in manageable batches.
+async function parseEpubToChunks(file, opts = {}) {
+  const maxChunkChars = opts.maxChunkChars || 80000;
+  const zip = await JSZip.loadAsync(file);
+
+  // 1) Find the OPF (package) file via META-INF/container.xml
+  const containerFile = zip.file("META-INF/container.xml");
+  if (!containerFile) throw new Error("This file doesn't look like an EPUB (missing container).");
+  const containerXml = await containerFile.async("string");
+  const opfPathMatch = /full-path=["']([^"']+)["']/i.exec(containerXml);
+  if (!opfPathMatch) throw new Error("Couldn't find the EPUB package file.");
+  const opfPath = opfPathMatch[1];
+
+  const opfFile = zip.file(opfPath);
+  if (!opfFile) throw new Error("EPUB package file is missing from the archive.");
+  const opfXml = await opfFile.async("string");
+
+  // Resolve a relative href from inside the OPF against the OPF's own directory
+  const opfDir = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
+  const resolveHref = (href) => {
+    if (href.startsWith("/")) return href.slice(1);
+    return opfDir + href;
+  };
+
+  // 2) Parse the manifest into id → { href, type }
+  const manifest = {};
+  const manifestRegex = /<item\b[^>]*\bid=["']([^"']+)["'][^>]*\bhref=["']([^"']+)["'][^>]*\bmedia-type=["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = manifestRegex.exec(opfXml)) !== null) {
+    manifest[m[1]] = { href: resolveHref(m[2]), type: m[3] };
+  }
+  // Some EPUBs put attributes in different orders — fallback pass
+  if (Object.keys(manifest).length === 0) {
+    const altRegex = /<item\b([^>]+)\/?>/gi;
+    let mm;
+    while ((mm = altRegex.exec(opfXml)) !== null) {
+      const attrs = mm[1];
+      const idM = /\bid=["']([^"']+)["']/i.exec(attrs);
+      const hrefM = /\bhref=["']([^"']+)["']/i.exec(attrs);
+      const typeM = /\bmedia-type=["']([^"']+)["']/i.exec(attrs);
+      if (idM && hrefM && typeM) manifest[idM[1]] = { href: resolveHref(hrefM[1]), type: typeM[1] };
+    }
+  }
+
+  // 3) Parse the spine for reading order
+  const spineIds = [];
+  const spineRegex = /<itemref\b[^>]*\bidref=["']([^"']+)["'][^>]*\/?>/gi;
+  let s;
+  while ((s = spineRegex.exec(opfXml)) !== null) spineIds.push(s[1]);
+
+  // 4) Extract text from each spine item that's HTML/XHTML
+  const sections = [];
+  for (const id of spineIds) {
+    const item = manifest[id];
+    if (!item) continue;
+    if (!/xhtml|html/i.test(item.type)) continue;
+    const file = zip.file(item.href);
+    if (!file) continue;
+    const html = await file.async("string");
+    const text = htmlToPlainText(html);
+    if (!text || text.length < 40) continue;
+    // Try to grab a section title from the first heading
+    const titleM = /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(html);
+    const label = titleM ? htmlToPlainText(titleM[1]).slice(0, 80) : "";
+    sections.push({ label, text });
+  }
+
+  if (sections.length === 0) {
+    // Fallback — concat any HTML/XHTML files we can find, ignoring spine
+    const allHtmlFiles = Object.keys(zip.files).filter((p) => /\.x?html?$/i.test(p));
+    for (const p of allHtmlFiles) {
+      const html = await zip.file(p).async("string");
+      const text = htmlToPlainText(html);
+      if (text && text.length > 40) sections.push({ label: "", text });
+    }
+  }
+
+  if (sections.length === 0) {
+    throw new Error("Couldn't read any text from this EPUB. It may be a scanned/image-only book — scanned books aren't supported yet.");
+  }
+
+  // 5) Pack sections into chunks ≤ maxChunkChars, never splitting a section across chunks unless one is huge
+  const chunks = [];
+  let current = { labels: [], text: "" };
+  for (const sec of sections) {
+    const header = sec.label ? `\n\n=== ${sec.label} ===\n\n` : "\n\n=== Section ===\n\n";
+    const piece = header + sec.text;
+    if (piece.length > maxChunkChars) {
+      // Big section — flush current, then chunk this section
+      if (current.text) { chunks.push(current); current = { labels: [], text: "" }; }
+      for (let i = 0; i < piece.length; i += maxChunkChars) {
+        chunks.push({ labels: sec.label ? [sec.label] : [], text: piece.slice(i, i + maxChunkChars) });
+      }
+      continue;
+    }
+    if (current.text.length + piece.length > maxChunkChars) {
+      chunks.push(current);
+      current = { labels: [], text: "" };
+    }
+    current.text += piece;
+    if (sec.label) current.labels.push(sec.label);
+  }
+  if (current.text) chunks.push(current);
+
+  return chunks;
+}
+
+// Strip HTML tags down to text with paragraph spacing preserved
+function htmlToPlainText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<head[\s\S]*?<\/head>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)\s*>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s+\n/g, "\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Discover recipes in an EPUB text chunk — returns [{title, pageHint, recipeText}]
+async function discoverRecipesInChunk(chunkText) {
+  const res = await fetch("/api/extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ebook_discover: true, text: chunkText }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || "Discovery failed");
+  return Array.isArray(data.recipes) ? data.recipes : [];
+}
+
+// Structure a single recipe's raw text into our recipe schema
+async function extractRecipeFromText(recipeText, titleHint) {
+  const res = await fetch("/api/extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ebook_extract: true, text: recipeText, title: titleHint || "" }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || "Recipe extraction failed");
+  return data;
+}
+
 async function generateCustomRecipe(details) {
   const res = await fetch("/api/extract", {
     method: "POST",
@@ -247,7 +405,7 @@ async function generateCustomRecipe(details) {
 const HOUSEHOLD_LS_KEY = "menu_household_code";
 
 const _state = {
-  cache: { library: null, week: null, list: null, cleaning: null, pharmacy: null },
+  cache: { library: null, week: null, list: null, cleaning: null, pharmacy: null, books: null },
   code: null,
   loaded: false,
   saveTimer: null,
@@ -259,6 +417,7 @@ const FIELD_FOR_KEY = {
   menu_list_v2: "list",
   menu_cleaning_v1: "cleaning",
   menu_pharmacy_v1: "pharmacy",
+  menu_books_v1: "books",
 };
 
 async function loadHousehold(code) {
@@ -274,6 +433,7 @@ async function loadHousehold(code) {
     list: Array.isArray(data.list) ? data.list : [],
     cleaning: Array.isArray(data.cleaning) ? data.cleaning : [],
     pharmacy: Array.isArray(data.pharmacy) ? data.pharmacy : [],
+    books: Array.isArray(data.books) ? data.books : [],
   };
   _state.code = code;
   _state.loaded = true;
@@ -339,7 +499,7 @@ function clearStoredHouseholdCode() {
   try { localStorage.removeItem(HOUSEHOLD_LS_KEY); } catch {}
   _state.code = null;
   _state.loaded = false;
-  _state.cache = { library: null, week: null, list: null, cleaning: null, pharmacy: null };
+  _state.cache = { library: null, week: null, list: null, cleaning: null, pharmacy: null, books: null };
 }
 
 // Read leftover data from the pre-sync localStorage version, so users can migrate.
@@ -572,6 +732,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
               {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
               {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
+              {recipe.pageNumber && <Tag>📖 p.{recipe.pageNumber}</Tag>}
             </div>
           </div>
 
@@ -1251,9 +1412,201 @@ const labelStyle = {
   marginBottom: 6, marginTop: 2, display: "block",
 };
 
+// ─── Books grid — shown under the Library "Books" section ────
+function BooksGrid({ books, library, onOpen, onAddNew }) {
+  if (books.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "40px 20px" }}>
+        <div style={{ fontSize: 44, marginBottom: 12 }}>📖</div>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 6 }}>No cookbooks yet</div>
+        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, maxWidth: 300, margin: "0 auto 16px" }}>
+          Add a cookbook on the Import tab, then photograph the recipes you want to keep.
+        </div>
+        <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff" }} onClick={onAddNew}>
+          Go to Import →
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+      {books.map((b) => {
+        const recipeCount = library.filter((r) => r.bookId === b.id).length;
+        return (
+          <button
+            key={b.id}
+            type="button"
+            onClick={() => onOpen(b.id)}
+            style={{
+              background: "var(--bg2)", borderRadius: "var(--radius)",
+              border: "1.5px solid var(--border)",
+              padding: 0, overflow: "hidden",
+              display: "flex", flexDirection: "column",
+              textAlign: "left", color: "var(--text)",
+              transition: "border-color 0.15s, transform 0.15s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--border2)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
+          >
+            <div style={{
+              aspectRatio: "3 / 4",
+              background: "var(--bg3)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              overflow: "hidden",
+            }}>
+              {b.coverPhoto ? (
+                <img src={b.coverPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              ) : (
+                <span style={{ fontSize: 44 }}>📖</span>
+              )}
+            </div>
+            <div style={{ padding: "10px 12px" }}>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, lineHeight: 1.3, marginBottom: 2 }}>
+                {b.title}
+              </div>
+              {b.author && <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 4 }}>{b.author}</div>}
+              <div style={{ fontSize: 11, color: "var(--text3)" }}>
+                {recipeCount} {recipeCount === 1 ? "recipe" : "recipes"}
+              </div>
+            </div>
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onAddNew}
+        style={{
+          background: "transparent", borderRadius: "var(--radius)",
+          border: "1.5px dashed var(--border2)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          aspectRatio: "0.78",
+          color: "var(--text3)", fontSize: 13, gap: 6,
+        }}
+      >
+        <span style={{ fontSize: 22 }}>＋</span>Add a book
+      </button>
+    </div>
+  );
+}
+
+// ─── Book detail — drilled-in view showing one book's recipes ──
+function BookDetail({
+  book, recipes, search, onSearchChange, totalInBook, menuRecipeIds,
+  onBack, onAddToMenu, onToggleFav, onToggleMade, onDeleteRecipe, onEditRecipe,
+  onDeleteBook, onEditBook, onAdjustQuantity, onGoToImport,
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(book.title);
+  const [editAuthor, setEditAuthor] = useState(book.author || "");
+
+  useEffect(() => {
+    setEditTitle(book.title);
+    setEditAuthor(book.author || "");
+  }, [book.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function saveBookEdits() {
+    const t = editTitle.trim();
+    if (!t) return;
+    onEditBook({ title: t, author: editAuthor.trim() });
+    setEditing(false);
+  }
+
+  return (
+    <div>
+      {/* Back + book header */}
+      <button
+        type="button"
+        onClick={onBack}
+        style={{ background: "none", color: "var(--text2)", fontSize: 13, padding: "4px 0 12px", display: "inline-flex", alignItems: "center", gap: 4 }}
+      >← Back to books</button>
+
+      <div style={{
+        background: "var(--bg2)", borderRadius: "var(--radius)",
+        border: "1.5px solid var(--border)",
+        padding: 14, marginBottom: 16,
+        display: "flex", gap: 14, alignItems: "flex-start",
+      }}>
+        {book.coverPhoto ? (
+          <img src={book.coverPhoto} alt="" style={{ width: 64, height: 86, objectFit: "cover", borderRadius: 6, flexShrink: 0, border: "1px solid var(--border2)" }} />
+        ) : (
+          <div style={{ width: 64, height: 86, background: "var(--bg3)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 30 }}>📖</div>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {editing ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <input style={{ ...inputStyle, padding: "7px 10px" }} value={editTitle} onChange={(e) => setEditTitle(e.target.value)} placeholder="Title" />
+              <input style={{ ...inputStyle, padding: "7px 10px" }} value={editAuthor} onChange={(e) => setEditAuthor(e.target.value)} placeholder="Author (optional)" />
+              <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff", padding: "6px 14px", fontSize: 12 }} onClick={saveBookEdits}>Save</button>
+                <button style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text2)", padding: "6px 14px", fontSize: 12 }} onClick={() => { setEditing(false); setEditTitle(book.title); setEditAuthor(book.author || ""); }}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 700, lineHeight: 1.2, marginBottom: 2 }}>{book.title}</div>
+              {book.author && <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 6 }}>{book.author}</div>}
+              <div style={{ fontSize: 12, color: "var(--text3)" }}>
+                {totalInBook} {totalInBook === 1 ? "recipe" : "recipes"}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff", padding: "6px 12px", fontSize: 12 }} onClick={onGoToImport}>+ Add recipe</button>
+                <button style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text2)", padding: "6px 12px", fontSize: 12, border: "1px solid var(--border2)" }} onClick={() => setEditing(true)}>Edit</button>
+                <button style={{ ...btnStyle, background: "var(--bg3)", color: "var(--red)", padding: "6px 12px", fontSize: 12, border: "1px solid var(--border)" }} onClick={onDeleteBook}>🗑 Delete book</button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Search */}
+      {totalInBook > 0 && (
+        <input
+          style={{ ...inputStyle, marginBottom: 12 }}
+          placeholder="Search by title, ingredient, or page number..."
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+        />
+      )}
+
+      {totalInBook === 0 ? (
+        <div style={{ textAlign: "center", padding: "30px 20px", color: "var(--text2)" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>📷</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6, maxWidth: 300, margin: "0 auto 14px" }}>
+            No recipes in this book yet. Snap photos of a recipe's pages on the Import tab.
+          </div>
+          <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff" }} onClick={onGoToImport}>
+            + Add a recipe
+          </button>
+        </div>
+      ) : recipes.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "30px 0", color: "var(--text2)", fontSize: 13 }}>
+          No recipes match "{search}"
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {recipes.map((r) => (
+            <RecipeCard
+              key={r.id}
+              recipe={r}
+              isOnMenu={menuRecipeIds.has(r.id)}
+              onAddToMenu={onAddToMenu}
+              onToggleFav={onToggleFav}
+              onToggleMade={onToggleMade}
+              onDelete={onDeleteRecipe}
+              onEdit={onEditRecipe}
+              onAdjustQuantity={onAdjustQuantity}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Import page ──────────────────────────────────────────────
-function ImportPage({ library, onImported, showBanner }) {
-  const [mode, setMode] = useState("link"); // "link" | "custom" | "freezer" | "photo"
+function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
+  const [mode, setMode] = useState("link"); // "link" | "custom" | "freezer" | "photo" | "book"
   const [url, setUrl] = useState("");
   const [customName, setCustomName] = useState("");
   const [customIngredients, setCustomIngredients] = useState("");
@@ -1262,6 +1615,24 @@ function ImportPage({ library, onImported, showBanner }) {
   const [photos, setPhotos] = useState([]); // [{ id, dataUrl, base64, bytes }]
   const photoLibInputRef = useRef(null);
   const photoCamInputRef = useRef(null);
+
+  // Book mode state
+  const [bookSelectedId, setBookSelectedId] = useState(null); // null = picker; "__new__" = creating; else book id
+  const [newBookTitle, setNewBookTitle] = useState("");
+  const [newBookAuthor, setNewBookAuthor] = useState("");
+  const [newBookCover, setNewBookCover] = useState(null); // { dataUrl, base64 }
+  const [bookPage, setBookPage] = useState("");
+  const bookCoverInputRef = useRef(null);
+  const bookPhotoLibInputRef = useRef(null);
+  const bookPhotoCamInputRef = useRef(null);
+
+  // EPUB upload state — lives inside Book mode
+  const epubInputRef = useRef(null);
+  const [epubStage, setEpubStage] = useState("idle"); // idle | parsing | discovering | review | importing
+  const [epubProgress, setEpubProgress] = useState({ done: 0, total: 0 });
+  const [epubFoundRecipes, setEpubFoundRecipes] = useState([]); // [{title, pageHint, recipeText, picked}]
+  const [epubError, setEpubError] = useState("");
+  const [epubImportResults, setEpubImportResults] = useState(null); // { saved, failed }
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1412,6 +1783,191 @@ function ImportPage({ library, onImported, showBanner }) {
     setLoading(false); setStage("");
   }
 
+  // ── Book mode handlers ──
+  async function pickBookCover(fileList) {
+    const file = Array.from(fileList || []).find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    try {
+      const c = await compressImageFile(file, 1200, 0.78);
+      setNewBookCover({ dataUrl: c.dataUrl, base64: c.base64 });
+    } catch {
+      setError("Couldn't read that image.");
+    }
+  }
+
+  async function handleCreateBook() {
+    if (!newBookTitle.trim()) { setError("Give the book a title."); return; }
+    setError("");
+    const newId = await onAddBook({
+      title: newBookTitle,
+      author: newBookAuthor,
+      coverPhoto: newBookCover?.dataUrl || "",
+    });
+    if (!newId) { setError("Couldn't create that book."); return; }
+    showBanner(`"${newBookTitle.trim()}" added to your books`);
+    setBookSelectedId(newId);
+    setNewBookTitle(""); setNewBookAuthor(""); setNewBookCover(null);
+  }
+
+  async function handleBookRecipe() {
+    if (!bookSelectedId || bookSelectedId === "__new__") { setError("Pick a book first."); return; }
+    if (!photos.length) { setError("Add at least one photo of the recipe page."); return; }
+    setError(""); setLoading(true);
+    try {
+      setStage(photos.length > 1 ? `Reading ${photos.length} photos...` : "Reading the recipe...");
+      const data = await fetchRecipeFromPhotos(photos.map((p) => p.base64), customName);
+      setStage("Saving to your library...");
+      const pageNum = bookPage.trim() ? parseInt(bookPage.trim(), 10) : null;
+      const recipe = normalizeRecipe({
+        id: uid(), sourceUrl: null, platform: "photo",
+        title: customName.trim() || data.title || "Untitled Recipe",
+        cuisine: data.cuisine || "Other",
+        prepTime: data.prepTime || 0,
+        cookTime: data.cookTime || 0,
+        servings: data.servings || 4,
+        skillLevel: data.skillLevel || "Medium",
+        ingredients: data.ingredients || [],
+        method: Array.isArray(data.method) ? data.method : [],
+        favourite: false, menuCount: 0, addedAt: Date.now(),
+        bookId: bookSelectedId,
+        pageNumber: Number.isFinite(pageNum) && pageNum > 0 ? pageNum : null,
+      });
+      // skipPicker — book recipes don't prompt to add to this week (user will pick later from the book)
+      onImported(recipe, { skipPicker: true });
+      setPhotos([]); setCustomName(""); setBookPage(""); setStage("");
+      showBanner(`"${recipe.title}" added to the book`);
+    } catch (e) {
+      setError(e?.message || "Could not read recipe from these photos. Try clearer or fewer images.");
+    }
+    setLoading(false); setStage("");
+  }
+
+  // ── EPUB upload + discovery + batch import ──
+  async function handleEpubFile(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    if (!/\.epub$/i.test(file.name)) {
+      setEpubError("Please choose a .epub file.");
+      return;
+    }
+    if (!bookSelectedId || bookSelectedId === "__new__") {
+      setEpubError("Pick a book first.");
+      return;
+    }
+    setEpubError("");
+    setEpubImportResults(null);
+    setEpubFoundRecipes([]);
+    setEpubStage("parsing");
+    try {
+      const chunks = await parseEpubToChunks(file);
+      setEpubStage("discovering");
+      setEpubProgress({ done: 0, total: chunks.length });
+      const found = [];
+      for (let i = 0; i < chunks.length; i++) {
+        try {
+          const recipes = await discoverRecipesInChunk(chunks[i].text);
+          for (const r of recipes) {
+            if (r && r.title && r.recipeText) {
+              found.push({
+                title: (r.title || "").toString(),
+                pageHint: (r.pageHint || "").toString(),
+                recipeText: (r.recipeText || "").toString(),
+                picked: true,
+              });
+            }
+          }
+        } catch (e) {
+          // Skip failed chunks; we don't want one bad section to kill the whole import
+          console.error("Chunk discovery failed:", e.message);
+        }
+        setEpubProgress({ done: i + 1, total: chunks.length });
+      }
+      // Deduplicate by title — some EPUBs repeat the index
+      const seen = new Set();
+      const deduped = [];
+      for (const r of found) {
+        const key = r.title.trim().toLowerCase();
+        if (!seen.has(key)) { seen.add(key); deduped.push(r); }
+      }
+      setEpubFoundRecipes(deduped);
+      setEpubStage("review");
+      if (deduped.length === 0) {
+        setEpubError("No recipes were detected in this EPUB. If it's a scanned book, that's expected — try the photo flow instead.");
+      }
+    } catch (e) {
+      setEpubError(e?.message || "Could not read this EPUB.");
+      setEpubStage("idle");
+    }
+  }
+
+  function toggleFoundRecipe(idx) {
+    setEpubFoundRecipes((prev) => prev.map((r, i) => i === idx ? { ...r, picked: !r.picked } : r));
+  }
+  function setAllFoundPicked(picked) {
+    setEpubFoundRecipes((prev) => prev.map((r) => ({ ...r, picked })));
+  }
+
+  async function importPickedEpubRecipes() {
+    const picked = epubFoundRecipes.filter((r) => r.picked);
+    if (!picked.length) { setEpubError("Tick at least one recipe to import."); return; }
+    if (!bookSelectedId || bookSelectedId === "__new__") { setEpubError("Pick a book first."); return; }
+    setEpubError("");
+    setEpubStage("importing");
+    setEpubProgress({ done: 0, total: picked.length });
+    let saved = 0, failed = 0;
+    for (let i = 0; i < picked.length; i++) {
+      const r = picked[i];
+      try {
+        const data = await extractRecipeFromText(r.recipeText, r.title);
+        const pageNum = Number.isFinite(data.pageNumber) && data.pageNumber > 0
+          ? data.pageNumber
+          : (() => {
+              const m = /(\d{1,4})/.exec(r.pageHint || "");
+              return m ? parseInt(m[1], 10) : null;
+            })();
+        const recipe = normalizeRecipe({
+          id: uid(),
+          sourceUrl: null,
+          platform: "custom",
+          title: (data.title || r.title || "Untitled").toString(),
+          cuisine: data.cuisine || "Other",
+          prepTime: data.prepTime || 0,
+          cookTime: data.cookTime || 0,
+          servings: data.servings || 4,
+          skillLevel: data.skillLevel || "Medium",
+          ingredients: data.ingredients || [],
+          method: Array.isArray(data.method) ? data.method : [],
+          favourite: false,
+          menuCount: 0,
+          addedAt: Date.now(),
+          bookId: bookSelectedId,
+          pageNumber: pageNum,
+        });
+        onImported(recipe, { skipPicker: true });
+        saved++;
+      } catch (e) {
+        console.error("Failed to extract:", r.title, e.message);
+        failed++;
+      }
+      setEpubProgress({ done: i + 1, total: picked.length });
+    }
+    setEpubImportResults({ saved, failed });
+    setEpubStage("idle");
+    setEpubFoundRecipes([]);
+    if (saved > 0) showBanner(`${saved} ${saved === 1 ? "recipe" : "recipes"} added to the book`);
+  }
+
+  function cancelEpubReview() {
+    setEpubStage("idle");
+    setEpubFoundRecipes([]);
+    setEpubError("");
+    setEpubProgress({ done: 0, total: 0 });
+  }
+
+  const selectedBook = bookSelectedId && bookSelectedId !== "__new__"
+    ? books.find((b) => b.id === bookSelectedId)
+    : null;
+
   return (
     <div style={{ padding: "0 0 40px" }}>
       <div style={{ marginBottom: 24 }}>
@@ -1419,11 +1975,16 @@ function ImportPage({ library, onImported, showBanner }) {
         <div style={{ fontSize: 13, color: "var(--text2)" }}>Paste any recipe link, or write your own</div>
       </div>
 
-      {/* Mode switcher */}
-      <div style={{ display: "flex", background: "var(--bg3)", borderRadius: "var(--radius2)", padding: 4, marginBottom: 24, gap: 4 }}>
-        {[["link","🔗 Link"],["custom","✏️ Custom"],["photo","📷 Photo"],["freezer","❄ Freezer"]].map(([id, label]) => (
+      {/* Mode switcher — grid so 5 chips wrap nicely on narrow screens */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(82px, 1fr))",
+        gap: 4,
+        background: "var(--bg3)", borderRadius: "var(--radius2)", padding: 4, marginBottom: 24,
+      }}>
+        {[["link","🔗 Link"],["custom","✏️ Custom"],["photo","📷 Photo"],["book","📖 Book"],["freezer","❄ Freezer"]].map(([id, label]) => (
           <button key={id} style={{
-            flex: 1, padding: "9px 4px", borderRadius: "var(--radius3)",
+            padding: "9px 4px", borderRadius: "var(--radius3)",
             fontSize: 12, fontWeight: 600,
             background: mode === id ? "var(--accent)" : "transparent",
             color: mode === id ? "#fff" : "var(--text2)",
@@ -1690,6 +2251,447 @@ function ImportPage({ library, onImported, showBanner }) {
         </div>
       )}
 
+      {/* Book — add recipes to a cookbook by photographing pages */}
+      {mode === "book" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "12px 14px", fontSize: 12, color: "var(--text2)", lineHeight: 1.7, border: "1px solid var(--border)" }}>
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>📖 Cookbooks:</span> Pick or create a book, then snap photos of a recipe's pages. Add a page number so you can search the book by title or page later. Each recipe lives inside its book in your library.
+          </div>
+
+          {/* Hidden file inputs for the cover photo and the recipe-page photos */}
+          <input
+            ref={bookCoverInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => { pickBookCover(e.target.files); e.target.value = ""; }}
+          />
+          <input
+            ref={bookPhotoLibInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }}
+          />
+          <input
+            ref={bookPhotoCamInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }}
+          />
+
+          {/* Phase 1: pick or create a book */}
+          {!selectedBook && bookSelectedId !== "__new__" && (
+            <>
+              <div style={labelStyle}>Choose a book</div>
+              {books.length === 0 && (
+                <div style={{ fontSize: 13, color: "var(--text3)", padding: "12px 14px", background: "var(--bg3)", borderRadius: "var(--radius3)", border: "1px dashed var(--border2)" }}>
+                  No books yet — create your first below.
+                </div>
+              )}
+              {books.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {books.map((b) => {
+                    const recipeCount = library.filter((r) => r.bookId === b.id).length;
+                    return (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onClick={() => { setBookSelectedId(b.id); setError(""); }}
+                        style={{
+                          background: "var(--bg3)", borderRadius: "var(--radius3)",
+                          border: "1.5px solid var(--border2)", padding: "10px 12px",
+                          display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+                          color: "var(--text)",
+                        }}
+                      >
+                        {b.coverPhoto ? (
+                          <img src={b.coverPhoto} alt="" style={{ width: 36, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+                        ) : (
+                          <div style={{ width: 36, height: 48, background: "var(--bg4)", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>📖</div>
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, lineHeight: 1.3 }}>{b.title}</div>
+                          {b.author && <div style={{ fontSize: 12, color: "var(--text3)" }}>{b.author}</div>}
+                          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{recipeCount} {recipeCount === 1 ? "recipe" : "recipes"}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => { setBookSelectedId("__new__"); setError(""); }}
+                style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              >+ New book</button>
+
+              <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "10px 14px", fontSize: 11, color: "var(--text3)", lineHeight: 1.6, border: "1px dashed var(--border)" }}>
+                PDF / ebook upload — coming soon. For now, snap photos of the pages you want to save.
+              </div>
+            </>
+          )}
+
+          {/* Phase 1b: creating a new book */}
+          {bookSelectedId === "__new__" && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={labelStyle}>New book</div>
+                <button
+                  type="button"
+                  onClick={() => { setBookSelectedId(null); setNewBookTitle(""); setNewBookAuthor(""); setNewBookCover(null); setError(""); }}
+                  style={{ background: "none", color: "var(--text3)", fontSize: 12, padding: "2px 6px" }}
+                >← Back</button>
+              </div>
+              <div>
+                <div style={labelStyle}>Title *</div>
+                <input
+                  style={inputStyle}
+                  placeholder="e.g. Ottolenghi Simple"
+                  value={newBookTitle}
+                  onChange={(e) => setNewBookTitle(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <div style={labelStyle}>Author <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span></div>
+                <input
+                  style={inputStyle}
+                  placeholder="e.g. Yotam Ottolenghi"
+                  value={newBookAuthor}
+                  onChange={(e) => setNewBookAuthor(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <div style={labelStyle}>Cover photo <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span></div>
+                {newBookCover ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <img src={newBookCover.dataUrl} alt="cover" style={{ width: 60, height: 80, objectFit: "cover", borderRadius: 6, border: "1.5px solid var(--border2)" }} />
+                    <button
+                      type="button"
+                      onClick={() => setNewBookCover(null)}
+                      style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text2)", padding: "7px 12px", fontSize: 12 }}
+                    >Remove</button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => bookCoverInputRef.current?.click()}
+                    style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+                  >📷 Choose a cover image</button>
+                )}
+              </div>
+              {error && <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{error}</div>}
+              <button
+                type="button"
+                onClick={handleCreateBook}
+                style={{
+                  ...btnStyle,
+                  background: newBookTitle.trim() ? "var(--accent)" : "var(--bg4)",
+                  color: newBookTitle.trim() ? "#fff" : "var(--text3)",
+                  cursor: newBookTitle.trim() ? "pointer" : "not-allowed",
+                }}
+                disabled={!newBookTitle.trim()}
+              >Create book →</button>
+            </>
+          )}
+
+          {/* Phase 2: book selected — add a recipe to it */}
+          {selectedBook && (
+            <>
+              <div style={{
+                background: "var(--bg3)", borderRadius: "var(--radius2)",
+                border: "1.5px solid var(--accentbg2)",
+                padding: "10px 12px", display: "flex", alignItems: "center", gap: 10,
+              }}>
+                {selectedBook.coverPhoto ? (
+                  <img src={selectedBook.coverPhoto} alt="" style={{ width: 36, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+                ) : (
+                  <div style={{ width: 36, height: 48, background: "var(--bg4)", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>📖</div>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.6px" }}>Adding recipe to</div>
+                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, lineHeight: 1.3 }}>{selectedBook.title}</div>
+                  {selectedBook.author && <div style={{ fontSize: 11, color: "var(--text3)" }}>{selectedBook.author}</div>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setBookSelectedId(null); setPhotos([]); setCustomName(""); setBookPage(""); setError(""); }}
+                  style={{ background: "none", color: "var(--text3)", fontSize: 12, padding: "2px 6px" }}
+                  disabled={loading}
+                >Switch book</button>
+              </div>
+
+              {/* Photo picker buttons */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => bookPhotoCamInputRef.current?.click()}
+                  disabled={loading || epubStage !== "idle"}
+                  style={{ ...btnStyle, flex: 1, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+                >📷 Take Photo</button>
+                <button
+                  type="button"
+                  onClick={() => bookPhotoLibInputRef.current?.click()}
+                  disabled={loading || epubStage !== "idle"}
+                  style={{ ...btnStyle, flex: 1, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+                >🖼 From Library</button>
+              </div>
+
+              {/* OR — EPUB upload (auto-detects all recipes in the book) */}
+              {epubStage === "idle" && photos.length === 0 && (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "2px 0" }}>
+                    <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                    <span style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "1px", fontWeight: 600 }}>or</span>
+                    <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                  </div>
+                  <input
+                    ref={epubInputRef}
+                    type="file"
+                    accept=".epub,application/epub+zip"
+                    style={{ display: "none" }}
+                    onChange={(e) => { handleEpubFile(e.target.files); e.target.value = ""; }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => epubInputRef.current?.click()}
+                    disabled={loading}
+                    style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+                  >📚 Upload EPUB — auto-detect all recipes</button>
+                  <div style={{ fontSize: 11, color: "var(--text3)", lineHeight: 1.5 }}>
+                    Text-based EPUBs only. Scanned/image cookbooks aren't supported — use the photo buttons above for those.
+                  </div>
+                  {epubImportResults && (
+                    <div style={{
+                      fontSize: 12, color: "var(--green)",
+                      background: "var(--greenbg)", border: "1px solid var(--border)",
+                      borderRadius: "var(--radius3)", padding: "8px 12px",
+                    }}>
+                      ✓ Saved {epubImportResults.saved} recipe{epubImportResults.saved === 1 ? "" : "s"}
+                      {epubImportResults.failed > 0 ? ` · ${epubImportResults.failed} failed to parse` : ""}.
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* EPUB parsing / discovering progress */}
+              {(epubStage === "parsing" || epubStage === "discovering") && (
+                <div style={{
+                  background: "var(--accentbg)", border: "1px solid var(--border2)",
+                  borderRadius: "var(--radius2)", padding: "14px 16px",
+                  display: "flex", flexDirection: "column", gap: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <Spinner />
+                    <span style={{ fontSize: 13, color: "var(--accent2)" }}>
+                      {epubStage === "parsing" && "Reading the EPUB..."}
+                      {epubStage === "discovering" && `Scanning for recipes... ${epubProgress.done}/${epubProgress.total} sections`}
+                    </span>
+                  </div>
+                  {epubStage === "discovering" && epubProgress.total > 0 && (
+                    <div style={{ height: 4, background: "var(--bg4)", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${(epubProgress.done / epubProgress.total) * 100}%`,
+                        height: "100%", background: "var(--accent)",
+                        transition: "width 0.3s",
+                      }} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* EPUB review — checklist of detected recipes */}
+              {epubStage === "review" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                        Found {epubFoundRecipes.length} {epubFoundRecipes.length === 1 ? "recipe" : "recipes"}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--text3)" }}>
+                        {epubFoundRecipes.filter((r) => r.picked).length} ticked for import
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => setAllFoundPicked(true)}
+                        style={{ background: "var(--bg3)", color: "var(--text2)", borderRadius: 6, padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)" }}
+                      >All</button>
+                      <button
+                        type="button"
+                        onClick={() => setAllFoundPicked(false)}
+                        style={{ background: "var(--bg3)", color: "var(--text2)", borderRadius: 6, padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)" }}
+                      >None</button>
+                    </div>
+                  </div>
+
+                  {epubFoundRecipes.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 360, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--radius3)", padding: 6 }}>
+                      {epubFoundRecipes.map((r, i) => (
+                        <label
+                          key={i}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 10,
+                            padding: "8px 10px", borderRadius: "var(--radius3)",
+                            background: r.picked ? "var(--bg3)" : "transparent",
+                            cursor: "pointer",
+                            border: `1px solid ${r.picked ? "var(--border2)" : "transparent"}`,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={r.picked}
+                            onChange={() => toggleFoundRecipe(i)}
+                            style={{ width: 16, height: 16, accentColor: "var(--accent)", flexShrink: 0 }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text)", lineHeight: 1.3 }}>
+                              {r.title}
+                            </div>
+                            {r.pageHint && (
+                              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{r.pageHint}</div>
+                            )}
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {epubError && <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{epubError}</div>}
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={importPickedEpubRecipes}
+                      disabled={!epubFoundRecipes.some((r) => r.picked)}
+                      style={{
+                        ...btnStyle, flex: 1,
+                        background: epubFoundRecipes.some((r) => r.picked) ? "var(--accent)" : "var(--bg4)",
+                        color: epubFoundRecipes.some((r) => r.picked) ? "#fff" : "var(--text3)",
+                      }}
+                    >
+                      Import {epubFoundRecipes.filter((r) => r.picked).length} →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelEpubReview}
+                      style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text2)" }}
+                    >Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {/* EPUB importing progress */}
+              {epubStage === "importing" && (
+                <div style={{
+                  background: "var(--accentbg)", border: "1px solid var(--border2)",
+                  borderRadius: "var(--radius2)", padding: "14px 16px",
+                  display: "flex", flexDirection: "column", gap: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <Spinner />
+                    <span style={{ fontSize: 13, color: "var(--accent2)" }}>
+                      Importing recipes... {epubProgress.done}/{epubProgress.total}
+                    </span>
+                  </div>
+                  {epubProgress.total > 0 && (
+                    <div style={{ height: 4, background: "var(--bg4)", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${(epubProgress.done / epubProgress.total) * 100}%`,
+                        height: "100%", background: "var(--accent)",
+                        transition: "width 0.3s",
+                      }} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {photos.length > 0 && epubStage === "idle" && (
+                <div>
+                  <div style={{ ...labelStyle, marginBottom: 8 }}>
+                    {photos.length} photo{photos.length !== 1 ? "s" : ""} selected
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: 8 }}>
+                    {photos.map((p, i) => (
+                      <div key={p.id} style={{ position: "relative", aspectRatio: "1", borderRadius: "var(--radius3)", overflow: "hidden", background: "var(--bg3)", border: "1.5px solid var(--border2)" }}>
+                        <img src={p.dataUrl} alt={`Photo ${i + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                        <div style={{ position: "absolute", top: 4, left: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>{i + 1}</div>
+                        <button
+                          type="button"
+                          onClick={() => removePhoto(p.id)}
+                          disabled={loading}
+                          title="Remove photo"
+                          style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.7)", color: "#fff", borderRadius: "50%", width: 22, height: 22, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {photos.length > 0 && epubStage === "idle" && (
+                <>
+                  <div>
+                    <div style={labelStyle}>Custom name <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — we'll detect it)</span></div>
+                    <input
+                      style={inputStyle}
+                      placeholder="e.g. Slow-Roast Lamb Shoulder"
+                      value={customName}
+                      onChange={(e) => setCustomName(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Page number <span style={{ color: "var(--text3)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — makes the recipe searchable by page)</span></div>
+                    <input
+                      type="number"
+                      min="1"
+                      style={{ ...inputStyle, maxWidth: 140 }}
+                      placeholder="e.g. 142"
+                      value={bookPage}
+                      onChange={(e) => setBookPage(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+                </>
+              )}
+
+              {loading && (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", background: "var(--accentbg)", borderRadius: "var(--radius2)", border: "1px solid var(--border2)" }}>
+                  <Spinner />
+                  <span style={{ fontSize: 13, color: "var(--accent2)" }}>{stage}</span>
+                </div>
+              )}
+              {error && <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{error}</div>}
+              {epubError && epubStage === "idle" && (
+                <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{epubError}</div>
+              )}
+
+              {photos.length > 0 && epubStage === "idle" && (
+                <button
+                  style={{
+                    ...btnStyle, background: loading ? "var(--bg4)" : "var(--accent)",
+                    color: loading ? "var(--text3)" : "#fff",
+                    cursor: loading ? "not-allowed" : "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  }}
+                  onClick={handleBookRecipe}
+                  disabled={loading}
+                >
+                  {loading ? <><Spinner size={15} /> Reading photos...</> : "Add recipe to book →"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {/* Freezer meal */}
       {mode === "freezer" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1942,6 +2944,12 @@ export default function App() {
   const [cleaning, setCleaning] = useState([]);
   const [pharmacy, setPharmacy] = useState([]);
 
+  // Cookbooks — each book is a container holding many recipes (recipes get bookId + pageNumber)
+  const [books, setBooks] = useState([]);
+  // Library state for the Books section: when set, we're drilled into a single book's recipes
+  const [bookViewId, setBookViewId] = useState(null);
+  const [bookSearch, setBookSearch] = useState("");
+
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
   const [loadError, setLoadError] = useState("");
@@ -1970,6 +2978,9 @@ export default function App() {
     setShoppingList([]);
     setCleaning([]);
     setPharmacy([]);
+    setBooks([]);
+    setBookViewId(null);
+    setBookSearch("");
     setStorageReady(false);
   }
 
@@ -1986,11 +2997,13 @@ export default function App() {
         const sl = await sget(SK.list);
         const cl = await sget(SK.cleaning);
         const ph = await sget(SK.pharmacy);
+        const bk = await sget(SK.books);
         if (lib) setLibrary(lib);
         if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
         if (Array.isArray(cl)) setCleaning(cl);
         if (Array.isArray(ph)) setPharmacy(ph);
+        if (Array.isArray(bk)) setBooks(bk);
       } catch (e) {
         setLoadError(e.message || "Failed to load household data.");
       }
@@ -2005,6 +3018,7 @@ export default function App() {
   const saveList = useCallback(async (sl, opts) => { await sset(SK.list, sl, opts); }, []);
   const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
   const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
+  const saveBooks = useCallback(async (bk) => { await sset(SK.books, bk); }, []);
 
   // Flush any pending debounced save when the tab is hidden or the page is unloaded.
   // Without this, a tick + immediate close (common on mobile) can lose the save.
@@ -2051,6 +3065,62 @@ export default function App() {
       const updated = pharmacy.filter((i) => i.id !== id);
       setPharmacy(updated); await savePharmacy(updated);
     }
+  }
+
+  // ── Book CRUD ──
+  // A book is a container for recipes; recipes get bookId (and optional pageNumber).
+  async function addBook({ title, author, coverPhoto }) {
+    const cleanTitle = cleanText(title || "");
+    if (!cleanTitle) return null;
+    const book = {
+      id: uid(),
+      title: cleanTitle,
+      author: (author || "").trim(),
+      coverPhoto: coverPhoto || "",
+      addedAt: Date.now(),
+    };
+    const updated = [book, ...books];
+    setBooks(updated);
+    await saveBooks(updated);
+    return book.id;
+  }
+
+  async function updateBook(updated) {
+    const next = books.map((b) => b.id === updated.id ? updated : b);
+    setBooks(next);
+    await saveBooks(next);
+  }
+
+  // Delete a book and all of its recipes. Anything on the menu pointing at those recipes
+  // is also cleared so the week doesn't show ghost entries.
+  async function deleteBook(bookId) {
+    const next = books.filter((b) => b.id !== bookId);
+    setBooks(next);
+    await saveBooks(next);
+    // Drop recipes that belonged to this book
+    const lib = library.filter((r) => r.bookId !== bookId);
+    if (lib.length !== library.length) {
+      setLibrary(lib);
+      await saveLibrary(lib);
+      // Clear any menu slots pointing at deleted recipes
+      const removedIds = new Set(library.filter((r) => r.bookId === bookId).map((r) => r.id));
+      const newWeek = { ...week };
+      let weekChanged = false;
+      for (const d of DAYS) {
+        if (newWeek[d] && removedIds.has(newWeek[d].id)) {
+          newWeek[d] = null;
+          weekChanged = true;
+        }
+      }
+      if (weekChanged) {
+        setWeek(newWeek);
+        await saveWeek(newWeek);
+        rebuildShoppingList(newWeek, lib);
+      } else {
+        rebuildShoppingList(week, lib);
+      }
+    }
+    if (bookViewId === bookId) setBookViewId(null);
   }
 
   function showBanner(msg) {
@@ -2285,13 +3355,41 @@ export default function App() {
     return false;
   }
 
+  // Recipes that belong to a book are hidden from the main library list — they live
+  // inside their book and are only shown when drilled into that book's detail view.
   const libFiltered = library.filter((r) => {
     if (!recipeMatchesQuery(r, libSearch)) return false;
     if (libSection === "favourites") return r.favourite;
     if (libSection === "freezer") return r.isFreezer;
-    if (libSection === "all") return true;
-    return r.cuisine === libSection;
+    if (libSection === "all") return !r.bookId;
+    return r.cuisine === libSection && !r.bookId;
   });
+
+  // Recipes inside the currently-drilled book, filtered by the book-detail search.
+  // "search" matches title/cuisine/ingredient OR a numeric page number.
+  function bookRecipeMatches(r, q) {
+    if (!q) return true;
+    const needle = q.trim().toLowerCase();
+    if (recipeMatchesQuery(r, needle)) return true;
+    if (r.pageNumber != null && String(r.pageNumber).includes(needle)) return true;
+    return false;
+  }
+  const activeBook = bookViewId ? books.find((b) => b.id === bookViewId) : null;
+  // If the active book vanishes (e.g. deleted from another device), drop the drilled-in view
+  useEffect(() => {
+    if (bookViewId && !activeBook) setBookViewId(null);
+  }, [bookViewId, activeBook]);
+  const bookRecipes = activeBook
+    ? library
+        .filter((r) => r.bookId === activeBook.id && bookRecipeMatches(r, bookSearch))
+        .sort((a, b) => {
+          // Pageless recipes sort to the end; otherwise by ascending page number
+          if (a.pageNumber == null && b.pageNumber == null) return (a.title || "").localeCompare(b.title || "");
+          if (a.pageNumber == null) return 1;
+          if (b.pageNumber == null) return -1;
+          return a.pageNumber - b.pageNumber;
+        })
+    : [];
 
   const freezerInventory = library.filter((r) => r.isFreezer);
 
@@ -2662,51 +3760,98 @@ export default function App() {
                 </div>
               )}
 
-              {/* Section tabs */}
-              {library.length > 0 && (
+              {/* Section tabs — hidden while drilled into a book */}
+              {library.length > 0 && !bookViewId && (
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
                   {(() => {
                     const hasFreezer = library.some((r) => r.isFreezer);
+                    const hasBooks = books.length > 0;
                     const chips = ["all", "favourites"];
                     if (hasFreezer) chips.push("freezer");
-                    chips.push(...usedCuisines);
+                    if (hasBooks) chips.push("books");
+                    // Cuisine chips — exclude cuisines that only appear in book recipes (they live inside their book)
+                    const cuisinesOutsideBooks = [...new Set(library.filter((r) => !r.bookId).map((r) => r.cuisine).filter(Boolean))];
+                    chips.push(...cuisinesOutsideBooks);
                     return chips.map((s) => (
                       <button key={s} style={{
                         padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600,
                         background: libSection === s ? "var(--accent)" : "var(--bg3)",
                         color: libSection === s ? "#fff" : "var(--text2)",
                         border: `1.5px solid ${libSection === s ? "var(--accent)" : "var(--border)"}`,
-                        textTransform: ["all", "favourites", "freezer"].includes(s) ? "capitalize" : "none",
+                        textTransform: ["all", "favourites", "freezer", "books"].includes(s) ? "capitalize" : "none",
                         transition: "all 0.15s",
-                      }} onClick={() => setLibSection(s)}>
-                        {s === "favourites" ? "⭐ Favourites" : s === "freezer" ? "❄ Freezer" : s === "all" ? "All" : s}
+                      }} onClick={() => { setLibSection(s); setBookViewId(null); }}>
+                        {s === "favourites" ? "⭐ Favourites" : s === "freezer" ? "❄ Freezer" : s === "books" ? "📖 Books" : s === "all" ? "All" : s}
                       </button>
                     ));
                   })()}
                 </div>
               )}
 
-              {/* Recipe cards */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {libFiltered.map((r) => (
-                  <RecipeCard
-                    key={r.id}
-                    recipe={r}
-                    isOnMenu={menuRecipeIds.has(r.id)}
-                    onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
-                    onToggleFav={toggleFav}
-                    onToggleMade={toggleMade}
-                    onDelete={deleteRecipe}
-                    onEdit={updateRecipe}
-                    onAdjustQuantity={(recipe, delta) => {
-                      const next = Math.max(0, (recipe.quantity || 0) + delta);
-                      updateRecipe({ ...recipe, quantity: next });
-                    }}
-                  />
-                ))}
-              </div>
+              {/* Books grid — shown when "Books" chip is active and not drilled in */}
+              {libSection === "books" && !bookViewId && (
+                <BooksGrid
+                  books={books}
+                  library={library}
+                  onOpen={(id) => { setBookViewId(id); setBookSearch(""); }}
+                  onAddNew={() => setTab("import")}
+                />
+              )}
 
-              {library.length === 0 && storageReady && (
+              {/* Drilled-in book detail */}
+              {bookViewId && activeBook && (
+                <BookDetail
+                  book={activeBook}
+                  recipes={bookRecipes}
+                  search={bookSearch}
+                  onSearchChange={setBookSearch}
+                  totalInBook={library.filter((r) => r.bookId === activeBook.id).length}
+                  menuRecipeIds={menuRecipeIds}
+                  onBack={() => { setBookViewId(null); setBookSearch(""); }}
+                  onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
+                  onToggleFav={toggleFav}
+                  onToggleMade={toggleMade}
+                  onDeleteRecipe={deleteRecipe}
+                  onEditRecipe={updateRecipe}
+                  onDeleteBook={async () => {
+                    const count = library.filter((r) => r.bookId === activeBook.id).length;
+                    const msg = count
+                      ? `Delete "${activeBook.title}" and its ${count} ${count === 1 ? "recipe" : "recipes"}? This can't be undone.`
+                      : `Delete "${activeBook.title}"? This can't be undone.`;
+                    if (confirm(msg)) await deleteBook(activeBook.id);
+                  }}
+                  onEditBook={(patch) => updateBook({ ...activeBook, ...patch })}
+                  onAdjustQuantity={(recipe, delta) => {
+                    const next = Math.max(0, (recipe.quantity || 0) + delta);
+                    updateRecipe({ ...recipe, quantity: next });
+                  }}
+                  onGoToImport={() => setTab("import")}
+                />
+              )}
+
+              {/* Recipe cards — only when NOT in books section */}
+              {libSection !== "books" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {libFiltered.map((r) => (
+                    <RecipeCard
+                      key={r.id}
+                      recipe={r}
+                      isOnMenu={menuRecipeIds.has(r.id)}
+                      onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
+                      onToggleFav={toggleFav}
+                      onToggleMade={toggleMade}
+                      onDelete={deleteRecipe}
+                      onEdit={updateRecipe}
+                      onAdjustQuantity={(recipe, delta) => {
+                        const next = Math.max(0, (recipe.quantity || 0) + delta);
+                        updateRecipe({ ...recipe, quantity: next });
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {library.length === 0 && books.length === 0 && storageReady && (
                 <div style={{ textAlign: "center", padding: "60px 20px" }}>
                   <div style={{ fontSize: 48, marginBottom: 16 }}>📚</div>
                   <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, marginBottom: 8 }}>Your library is empty</div>
@@ -2719,7 +3864,7 @@ export default function App() {
                 </div>
               )}
 
-              {library.length > 0 && libFiltered.length === 0 && (
+              {library.length > 0 && libSection !== "books" && libFiltered.length === 0 && (
                 <div style={{ textAlign: "center", padding: "40px 0", color: "var(--text2)", fontSize: 13 }}>
                   No recipes match "{libSearch || libSection}"
                 </div>
@@ -2865,7 +4010,13 @@ export default function App() {
 
           {/* ══ IMPORT TAB ══ */}
           {tab === "import" && (
-            <ImportPage library={library} onImported={handleImported} showBanner={showBanner} />
+            <ImportPage
+              library={library}
+              books={books}
+              onImported={handleImported}
+              onAddBook={addBook}
+              showBanner={showBanner}
+            />
           )}
         </div>
       </div>

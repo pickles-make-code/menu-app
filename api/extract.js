@@ -47,6 +47,16 @@ export default async function handler(req, res) {
     return handlePhotos(req, res, ANTHROPIC_KEY);
   }
 
+  // ── MODE D: EPUB recipe discovery (scan a chunk of book text for recipe titles + their raw text) ──
+  if (req.method === "POST" && req.body?.ebook_discover) {
+    return handleEbookDiscover(req, res, ANTHROPIC_KEY);
+  }
+
+  // ── MODE E: EPUB recipe extraction (structure a single recipe's raw text) ──
+  if (req.method === "POST" && req.body?.ebook_extract) {
+    return handleEbookExtract(req, res, ANTHROPIC_KEY);
+  }
+
   // ── MODE C: URL extraction ─────────────────────────────────
   const url = req.query?.url || req.body?.url;
   if (!url) return res.status(400).json({ error: "No URL provided." });
@@ -554,7 +564,7 @@ Rules:
 
 // ─── Shared: call Claude API ───────────────────────────────────
 // `content` may be a plain prompt string or an array of content blocks (for vision).
-async function callClaude(content, apiKey) {
+async function callClaude(content, apiKey, opts = {}) {
   const messageContent = typeof content === "string"
     ? content
     : content; // array of {type:"image"|"text",...}
@@ -567,8 +577,8 @@ async function callClaude(content, apiKey) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1500,
+      model: opts.model || "claude-sonnet-4-6",
+      max_tokens: opts.max_tokens || 1500,
       messages: [{ role: "user", content: messageContent }],
     }),
   });
@@ -637,6 +647,98 @@ Rules:
     return res.status(200).json({ ...data, _source: "Photo" });
   } catch (err) {
     console.error("Photo extract failed:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ─── EPUB recipe discovery ────────────────────────────────────
+// Given a chunk of book text, return every recipe found in it as
+// [{ title, pageHint, recipeText }]. recipeText is the full plain text
+// of that recipe so we can later structure it without re-sending the book.
+async function handleEbookDiscover(req, res, ANTHROPIC_KEY) {
+  const text = (req.body?.text || "").toString();
+  if (!text || text.length < 80) {
+    return res.status(400).json({ error: "Not enough text to scan for recipes." });
+  }
+
+  const prompt = `You are scanning a section of a cookbook. Identify EVERY recipe present in the text below and return each one with its full text exactly as it appears.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "recipes": [
+    {
+      "title": "Recipe Title",
+      "pageHint": "p. 142",
+      "recipeText": "The full text of this recipe, from its heading down to (but not including) the next recipe. Include ingredients and method exactly as printed."
+    }
+  ]
+}
+
+Rules:
+- Skip front-matter (introduction, notes on ingredients, equipment lists, indexes, contents pages). Only return actual recipes that have ingredients + steps.
+- "pageHint" — if the text mentions a printed page number for this recipe (e.g. "Page 142", "p. 142"), include it as a short string like "p. 142". Otherwise return an empty string.
+- "recipeText" — include the recipe title and the complete recipe body. Do NOT summarise or paraphrase. Copy the text. Cap at ~4000 characters per recipe; if a recipe is longer, truncate the method tail.
+- If no recipes are present in this section, return { "recipes": [] }.
+
+TEXT TO SCAN:
+${text}`;
+
+  try {
+    const data = await callClaude(prompt, ANTHROPIC_KEY, { max_tokens: 8000 });
+    const recipes = Array.isArray(data.recipes) ? data.recipes : [];
+    return res.status(200).json({ recipes });
+  } catch (err) {
+    console.error("Ebook discover failed:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ─── EPUB single-recipe extraction ────────────────────────────
+// Structure a single recipe's raw text into the standard schema.
+async function handleEbookExtract(req, res, ANTHROPIC_KEY) {
+  const text = (req.body?.text || "").toString();
+  const titleHint = (req.body?.title || "").toString();
+  if (!text || text.length < 30) {
+    return res.status(400).json({ error: "Recipe text too short to extract." });
+  }
+
+  const prompt = `Below is the raw text of a single recipe from a cookbook. Structure it.
+
+${titleHint ? `Title hint (use if it matches the text): "${titleHint}"\n` : ""}
+RECIPE TEXT:
+${text}
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "title": "Recipe Title",
+  "cuisine": "one of: Italian/Asian/Mexican/Mediterranean/Indian/Middle Eastern/American/French/Japanese/Thai/Greek/Spanish/Other",
+  "prepTime": 15,
+  "cookTime": 30,
+  "servings": 4,
+  "skillLevel": "Easy|Medium|Advanced",
+  "pageNumber": 142,
+  "ingredients": [
+    {"item": "Chicken Thighs", "amount": "600g", "category": "meat"}
+  ],
+  "method": [
+    "Step 1 text...",
+    "Step 2 text..."
+  ]
+}
+
+${CATEGORY_GUIDE}
+
+Rules:
+- ALL amounts must be metric (g, kg, ml, L). Countable items (eggs, cloves) stay as numbers.
+- "method" is an array of clear step strings copied from the source.
+- "pageNumber" — if the source mentions a printed page number, return it as an integer. Otherwise omit the field or set it to null.
+- If you genuinely cannot identify a recipe in the text, return {"error": "Couldn't structure this recipe"}.`;
+
+  try {
+    const data = await callClaude(prompt, ANTHROPIC_KEY, { max_tokens: 2000 });
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("Ebook extract failed:", err.message);
     return res.status(500).json({ error: err.message });
   }
 }
