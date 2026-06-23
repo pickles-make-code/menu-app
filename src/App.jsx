@@ -29,6 +29,11 @@ const CUISINES = [
 ];
 const SKILL_LEVELS = ["Easy","Medium","Advanced"];
 
+// Course tag — used to group multiple recipes per day on the Menu tab.
+// Order matters: this is the display order under each day.
+const COURSES = ["Starter", "Main", "Side", "Dessert"];
+const DEFAULT_COURSE = "Main";
+
 // ─── Helpers ─────────────────────────────────────────────────
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
@@ -145,9 +150,13 @@ function normaliseIngredientForGrouping(item) {
 }
 
 // Normalize a recipe object: apply Aus English + title case to title and ingredient items.
+// Also fills in defaults for fields added later (course, status) so older library entries
+// behave consistently after a version bump.
 function normalizeRecipe(r) {
   if (!r) return r;
   return {
+    course: DEFAULT_COURSE,
+    status: "published",
     ...r,
     title: cleanText(r.title || ""),
     ingredients: (r.ingredients || []).map((ing) => ({
@@ -236,8 +245,9 @@ async function compressImageFile(file, maxDimension = 1600, quality = 0.82) {
 // ─── EPUB parsing (client-side) ─────────────────────────────────
 // EPUBs are ZIP files of XHTML. We pull the spine, extract plain text per file,
 // and return chunks (~80KB each) so we can feed Claude in manageable batches.
-async function parseEpubToChunks(file, opts = {}) {
-  const maxChunkChars = opts.maxChunkChars || 80000;
+
+// Open the EPUB and return the bits everyone else needs (zip handle + parsed OPF).
+async function openEpub(file) {
   const zip = await JSZip.loadAsync(file);
 
   // 1) Find the OPF (package) file via META-INF/container.xml
@@ -255,27 +265,27 @@ async function parseEpubToChunks(file, opts = {}) {
   // Resolve a relative href from inside the OPF against the OPF's own directory
   const opfDir = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
   const resolveHref = (href) => {
+    if (!href) return "";
     if (href.startsWith("/")) return href.slice(1);
     return opfDir + href;
   };
 
-  // 2) Parse the manifest into id → { href, type }
+  // 2) Parse the manifest into id → { href, type, properties }
   const manifest = {};
-  const manifestRegex = /<item\b[^>]*\bid=["']([^"']+)["'][^>]*\bhref=["']([^"']+)["'][^>]*\bmedia-type=["']([^"']+)["'][^>]*>/gi;
-  let m;
-  while ((m = manifestRegex.exec(opfXml)) !== null) {
-    manifest[m[1]] = { href: resolveHref(m[2]), type: m[3] };
-  }
-  // Some EPUBs put attributes in different orders — fallback pass
-  if (Object.keys(manifest).length === 0) {
-    const altRegex = /<item\b([^>]+)\/?>/gi;
-    let mm;
-    while ((mm = altRegex.exec(opfXml)) !== null) {
-      const attrs = mm[1];
-      const idM = /\bid=["']([^"']+)["']/i.exec(attrs);
-      const hrefM = /\bhref=["']([^"']+)["']/i.exec(attrs);
-      const typeM = /\bmedia-type=["']([^"']+)["']/i.exec(attrs);
-      if (idM && hrefM && typeM) manifest[idM[1]] = { href: resolveHref(hrefM[1]), type: typeM[1] };
+  const itemBlockRegex = /<item\b([^>]+?)\/?>/gi;
+  let mb;
+  while ((mb = itemBlockRegex.exec(opfXml)) !== null) {
+    const attrs = mb[1];
+    const idM = /\bid=["']([^"']+)["']/i.exec(attrs);
+    const hrefM = /\bhref=["']([^"']+)["']/i.exec(attrs);
+    const typeM = /\bmedia-type=["']([^"']+)["']/i.exec(attrs);
+    const propsM = /\bproperties=["']([^"']+)["']/i.exec(attrs);
+    if (idM && hrefM && typeM) {
+      manifest[idM[1]] = {
+        href: resolveHref(hrefM[1]),
+        type: typeM[1],
+        properties: propsM ? propsM[1] : "",
+      };
     }
   }
 
@@ -285,7 +295,83 @@ async function parseEpubToChunks(file, opts = {}) {
   let s;
   while ((s = spineRegex.exec(opfXml)) !== null) spineIds.push(s[1]);
 
-  // 4) Extract text from each spine item that's HTML/XHTML
+  return { zip, opfXml, opfDir, manifest, spineIds, resolveHref };
+}
+
+// Extract the book's title, author, and (if present) cover image as a base64 data URL.
+// Handles EPUB2-style `<meta name="cover">` references and EPUB3-style `properties="cover-image"`.
+async function extractEpubMetadata(opened, fileNameFallback = "") {
+  const { zip, opfXml, manifest } = opened;
+
+  // Title — dc:title (with or without namespace prefix)
+  const titleM = /<dc:title\b[^>]*>([\s\S]*?)<\/dc:title>/i.exec(opfXml)
+    || /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(opfXml);
+  const title = titleM ? htmlToPlainText(titleM[1]).trim() : "";
+
+  // Author — dc:creator (may have multiple — take the first)
+  const creatorM = /<dc:creator\b[^>]*>([\s\S]*?)<\/dc:creator>/i.exec(opfXml)
+    || /<creator\b[^>]*>([\s\S]*?)<\/creator>/i.exec(opfXml);
+  const author = creatorM ? htmlToPlainText(creatorM[1]).trim() : "";
+
+  // Cover image — try in priority order
+  let coverItem = null;
+
+  // EPUB3: manifest item with properties="cover-image"
+  for (const id in manifest) {
+    if (/cover-image/i.test(manifest[id].properties || "")) {
+      coverItem = manifest[id];
+      break;
+    }
+  }
+  // EPUB2: <meta name="cover" content="<itemid>">
+  if (!coverItem) {
+    const metaCoverM = /<meta\b[^>]*\bname=["']cover["'][^>]*\bcontent=["']([^"']+)["'][^>]*>/i.exec(opfXml)
+      || /<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']cover["'][^>]*>/i.exec(opfXml);
+    if (metaCoverM && manifest[metaCoverM[1]]) {
+      coverItem = manifest[metaCoverM[1]];
+    }
+  }
+  // Fallback: any manifest item whose id or href screams "cover" and is an image
+  if (!coverItem) {
+    for (const id in manifest) {
+      const item = manifest[id];
+      if (!/image/i.test(item.type)) continue;
+      if (/cover/i.test(id) || /cover/i.test(item.href)) {
+        coverItem = item;
+        break;
+      }
+    }
+  }
+
+  let coverDataUrl = "";
+  if (coverItem && coverItem.href) {
+    try {
+      const imgFile = zip.file(coverItem.href);
+      if (imgFile) {
+        const b64 = await imgFile.async("base64");
+        const mediaType = coverItem.type || "image/jpeg";
+        coverDataUrl = `data:${mediaType};base64,${b64}`;
+      }
+    } catch (e) {
+      // Cover read failed — non-fatal
+    }
+  }
+
+  // Fallback title from filename if metadata is missing
+  let finalTitle = title;
+  if (!finalTitle && fileNameFallback) {
+    finalTitle = fileNameFallback.replace(/\.epub$/i, "").replace(/[._-]+/g, " ").trim();
+  }
+
+  return { title: finalTitle, author, coverDataUrl };
+}
+
+// Walk the spine and pack plain text into ~maxChunkChars chunks for Claude.
+async function extractEpubChunks(opened, opts = {}) {
+  const maxChunkChars = opts.maxChunkChars || 80000;
+  const { zip, manifest, spineIds } = opened;
+
+  // Extract text from each spine item that's HTML/XHTML
   const sections = [];
   for (const id of spineIds) {
     const item = manifest[id];
@@ -316,14 +402,13 @@ async function parseEpubToChunks(file, opts = {}) {
     throw new Error("Couldn't read any text from this EPUB. It may be a scanned/image-only book — scanned books aren't supported yet.");
   }
 
-  // 5) Pack sections into chunks ≤ maxChunkChars, never splitting a section across chunks unless one is huge
+  // Pack sections into chunks ≤ maxChunkChars, never splitting a section across chunks unless one is huge
   const chunks = [];
   let current = { labels: [], text: "" };
   for (const sec of sections) {
     const header = sec.label ? `\n\n=== ${sec.label} ===\n\n` : "\n\n=== Section ===\n\n";
     const piece = header + sec.text;
     if (piece.length > maxChunkChars) {
-      // Big section — flush current, then chunk this section
       if (current.text) { chunks.push(current); current = { labels: [], text: "" }; }
       for (let i = 0; i < piece.length; i += maxChunkChars) {
         chunks.push({ labels: sec.label ? [sec.label] : [], text: piece.slice(i, i + maxChunkChars) });
@@ -340,6 +425,12 @@ async function parseEpubToChunks(file, opts = {}) {
   if (current.text) chunks.push(current);
 
   return chunks;
+}
+
+// Thin wrapper kept for backwards-compat with the existing call sites
+async function parseEpubToChunks(file, opts = {}) {
+  const opened = await openEpub(file);
+  return extractEpubChunks(opened, opts);
 }
 
 // Strip HTML tags down to text with paragraph spacing preserved
@@ -451,8 +542,11 @@ async function sset(key, val, opts) {
   if (!_state.code) return;
   _state.cache[FIELD_FOR_KEY[key]] = val;
   clearTimeout(_state.saveTimer);
+  _state.saveTimer = null;
   if (opts && opts.immediate) {
-    saveHousehold();
+    // Actually wait for the network round-trip so callers that `await` get
+    // back-pressure (otherwise the next action can race the save).
+    await saveHousehold();
     return;
   }
   // Tight debounce — fires fast enough that a quick close still catches up,
@@ -472,7 +566,7 @@ function flushPendingSaves() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: _state.code, ..._state.cache }),
       keepalive: true,
-    });
+    }).catch(() => {});
   } catch (e) {
     // Best-effort — nothing useful to do here
   }
@@ -503,23 +597,32 @@ function clearStoredHouseholdCode() {
 }
 
 // Read leftover data from the pre-sync localStorage version, so users can migrate.
-// Normalize the week state shape. Old data stored just a recipe id per day; the new format
-// stores { id, mult } so each day can have its own serving multiplier.
+// Normalize the week state shape. Each day is an array of { id, mult, cooked } entries so
+// multiple recipes (different courses) can sit on the same day.
+// Migrates: legacy string-per-day, legacy single-object-per-day → wraps in an array.
+function emptyWeek() {
+  return Object.fromEntries(DAYS.map((d) => [d, []]));
+}
 function normalizeWeek(wk) {
-  const empty = Object.fromEntries(DAYS.map((d) => [d, null]));
-  if (!wk || typeof wk !== "object") return empty;
-  const out = { ...empty };
+  if (!wk || typeof wk !== "object") return emptyWeek();
+  const out = emptyWeek();
   for (const d of DAYS) {
     const v = wk[d];
     if (!v) continue;
-    if (typeof v === "string") { out[d] = { id: v, mult: 1, cooked: false }; continue; }
-    if (typeof v === "object" && v.id) {
-      out[d] = {
-        id: v.id,
-        mult: Math.max(1, parseInt(v.mult, 10) || 1),
-        cooked: !!v.cooked,
-      };
-      continue;
+    const list = Array.isArray(v) ? v : [v];
+    for (const entry of list) {
+      if (!entry) continue;
+      if (typeof entry === "string") {
+        out[d].push({ id: entry, mult: 1, cooked: false });
+        continue;
+      }
+      if (typeof entry === "object" && entry.id) {
+        out[d].push({
+          id: entry.id,
+          mult: Math.max(1, parseInt(entry.mult, 10) || 1),
+          cooked: !!entry.cooked,
+        });
+      }
     }
   }
   return out;
@@ -646,6 +749,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
     setEditData({
       title: recipe.title,
       cuisine: recipe.cuisine,
+      course: recipe.course || DEFAULT_COURSE,
       skillLevel: recipe.skillLevel,
       prepTime: recipe.prepTime,
       cookTime: recipe.cookTime,
@@ -729,6 +833,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
               )}
               {recipe.mine && <Badge color="var(--accent)">✍ Mine</Badge>}
               {recipe.madeIt && <Badge color="var(--green)">🍳 Made</Badge>}
+              {recipe.course && recipe.course !== DEFAULT_COURSE && <Tag>{recipe.course}</Tag>}
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
               {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
               {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
@@ -777,6 +882,12 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
             <div>
               <div style={labelStyle}>Title</div>
               <input style={{ ...inputStyle, width: "100%" }} value={editData.title} onChange={(e) => setEditData({ ...editData, title: e.target.value })} />
+            </div>
+            <div>
+              <div style={labelStyle}>Course</div>
+              <select style={{ ...inputStyle, width: "100%", padding: "9px 10px" }} value={editData.course} onChange={(e) => setEditData({ ...editData, course: e.target.value })}>
+                {COURSES.map((c) => <option key={c}>{c}</option>)}
+              </select>
             </div>
             <div>
               <div style={labelStyle}>Cuisine</div>
@@ -1201,136 +1312,202 @@ function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClos
   );
 }
 
+// ─── Weather helpers ─────────────────────────────────────────
+function wmoToEmoji(code) {
+  if (code === 0) return "☀️";
+  if (code <= 3) return "⛅";
+  if (code <= 48) return "🌫️";
+  if (code <= 57) return "🌦️";
+  if (code <= 67) return "🌧️";
+  if (code <= 77) return "🌨️";
+  if (code <= 82) return "🌦️";
+  if (code <= 99) return "⛈️";
+  return "🌡️";
+}
+
+// Returns { Monday: "2026-06-23", ..., Sunday: "2026-06-29" } for the current Melbourne week.
+// Uses Melbourne wall-clock time so dates are always correct regardless of server/browser timezone.
+function getMelbourneWeekDates() {
+  const melbNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Australia/Melbourne" }));
+  const todayDow = melbNow.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+  const daysFromMonday = (todayDow + 6) % 7; // 0 on Monday, 6 on Sunday
+  const result = {};
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(melbNow);
+    d.setDate(melbNow.getDate() - daysFromMonday + i);
+    result[DAYS[i]] = d.getFullYear() + "-" +
+      String(d.getMonth() + 1).padStart(2, "0") + "-" +
+      String(d.getDate()).padStart(2, "0");
+  }
+  return result;
+}
+
 // Day card for Menu tab
 // Drag is driven by Pointer Events at the App level so it works on mouse + touch.
 // `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
-function DayCard({ day, recipe, mult = 1, cooked = false, onAdd, onRemove, onView, onToggleCooked, onDragStart, isDragging, isTarget }) {
+// Day card on the Menu tab — holds an array of entries (one per recipe assigned to this day).
+// Recipes are grouped by course (Starter / Main / Side / Dessert) and rendered under their heading.
+// Each entry has its own cooked checkbox and remove button; the whole day still drags as a unit.
+function DayCard({ day, entries = [], recipes = [], onAdd, onRemove, onView, onToggleCooked, onDragStart, isDragging, isTarget, weather }) {
+  // Pair entries with their recipe, drop ghosts (recipe deleted).
+  const items = entries
+    .map((entry) => ({ entry, recipe: recipes.find((r) => r.id === entry.id) }))
+    .filter((x) => x.recipe);
+
+  const hasItems = items.length > 0;
+  // Day is "fully cooked" only if every entry is cooked
+  const allCooked = hasItems && items.every((x) => x.entry.cooked);
+
+  // Group by course, preserving COURSES display order
+  const byCourse = COURSES.map((course) => ({
+    course,
+    items: items.filter((x) => (x.recipe.course || DEFAULT_COURSE) === course),
+  })).filter((g) => g.items.length > 0);
+
   return (
     <div
       data-day={day}
       style={{
         background: isTarget ? "var(--accentbg)" : "var(--bg2)",
         borderRadius: "var(--radius)",
-        border: `1.5px ${isTarget ? "dashed var(--accent)" : `solid ${cooked ? "var(--green)" : recipe ? "var(--border2)" : "var(--border)"}`}`,
+        border: `1.5px ${isTarget ? "dashed var(--accent)" : `solid ${allCooked ? "var(--green)" : hasItems ? "var(--border2)" : "var(--border)"}`}`,
         overflow: "hidden",
         transition: "border-color 0.15s, background 0.15s",
+        opacity: isDragging ? 0.4 : 1,
       }}>
+      {/* Header: day name + drag handle */}
       <div style={{
         padding: "10px 16px",
         background: "var(--bg3)",
         borderBottom: "1px solid var(--border)",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
       }}>
-        <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.8px", textTransform: "uppercase", color: cooked ? "var(--green)" : "var(--accent)" }}>
-          {day}{cooked && " · Cooked"}
+        <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.8px", textTransform: "uppercase", color: allCooked ? "var(--green)" : "var(--accent)" }}>
+          {day}{allCooked && " · Cooked"}
         </span>
-        {recipe && (
-          <button
-            style={{ background: "none", fontSize: 13, color: "var(--text3)", padding: 2 }}
-            onClick={(e) => { e.stopPropagation(); onRemove(day); }}
-          >✕</button>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {weather && (
+            <span style={{ fontSize: 12, color: "var(--text3)", fontWeight: 500, letterSpacing: 0 }}>
+              {weather.icon} {weather.max}°
+            </span>
+          )}
+          {hasItems && (
+            <div
+              onPointerDown={(e) => {
+                if (e.pointerType === "mouse" && e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                onDragStart(day, e.clientX, e.clientY);
+              }}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                color: "var(--text3)", fontSize: 16, lineHeight: 1,
+                cursor: "grab", touchAction: "none", padding: "4px 4px", userSelect: "none",
+              }}
+              title="Drag to swap with another day"
+            >⋮⋮</div>
+          )}
+        </div>
       </div>
 
-      {recipe ? (
-        <div
-          style={{
-            padding: "14px 16px",
-            userSelect: "none",
-            opacity: isDragging ? 0.4 : cooked ? 0.7 : 1,
-            transition: "opacity 0.15s",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 10,
-          }}
-        >
-          {/* Cooked checkbox — tick once the meal's been made */}
-          <div
-            onClick={(e) => { e.stopPropagation(); onToggleCooked && onToggleCooked(day); }}
-            title={cooked ? "Mark as not cooked" : "Mark as cooked (removes ingredients from list)"}
-            style={{
-              width: 22, height: 22, borderRadius: 6,
-              border: `2px solid ${cooked ? "var(--green)" : "var(--border2)"}`,
-              background: cooked ? "var(--green)" : "transparent",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              flexShrink: 0, cursor: "pointer",
-              transition: "all 0.15s",
-              marginTop: 1,
-            }}
-          >
-            {cooked && <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>✓</span>}
+      {/* Course groups */}
+      {byCourse.map(({ course, items }) => (
+        <div key={course} style={{ borderTop: "1px solid var(--border)" }}>
+          <div style={{
+            padding: "8px 16px 4px",
+            fontSize: 10, fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase",
+            color: "var(--text3)",
+          }}>
+            {course}{items.length > 1 ? "s" : ""}
           </div>
-          {/* Drag handle — only this element captures pointer events so the rest of the card can scroll on touch */}
-          <div
-            onPointerDown={(e) => {
-              // Skip secondary mouse buttons (right-click etc.)
-              if (e.pointerType === "mouse" && e.button !== 0) return;
-              e.preventDefault();
-              e.stopPropagation();
-              onDragStart(day, e.clientX, e.clientY);
-            }}
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              color: "var(--text3)",
-              fontSize: 16,
-              lineHeight: 1,
-              cursor: "grab",
-              touchAction: "none",
-              padding: "4px 4px",
-              userSelect: "none",
-            }}
-            title="Drag to swap with another day"
-          >
-            ⋮⋮
-          </div>
-          <div
-            style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
-            onClick={() => onView && onView(day)}
-            title="Tap to view full recipe"
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-              <div style={{
-                fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 600,
-                color: cooked ? "var(--text3)" : "var(--text)",
-                textDecoration: cooked ? "line-through" : "none",
-              }}>
-                {recipe.isFreezer && "❄ "}{recipe.title}
+          {items.map(({ entry, recipe }) => {
+            const cooked = !!entry.cooked;
+            const mult = entry.mult || 1;
+            return (
+              <div
+                key={recipe.id}
+                style={{
+                  padding: "10px 16px",
+                  display: "flex", alignItems: "flex-start", gap: 10,
+                  opacity: cooked ? 0.65 : 1,
+                  userSelect: "none",
+                }}
+              >
+                {/* Per-recipe cooked checkbox */}
+                <div
+                  onClick={(e) => { e.stopPropagation(); onToggleCooked && onToggleCooked(day, recipe.id); }}
+                  title={cooked ? "Mark as not cooked" : "Mark as cooked (removes ingredients from list)"}
+                  style={{
+                    width: 20, height: 20, borderRadius: 5,
+                    border: `2px solid ${cooked ? "var(--green)" : "var(--border2)"}`,
+                    background: cooked ? "var(--green)" : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    flexShrink: 0, cursor: "pointer",
+                    transition: "all 0.15s", marginTop: 2,
+                  }}
+                >
+                  {cooked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
+                </div>
+                <div
+                  style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                  onClick={() => onView && onView(day, recipe.id)}
+                  title="Tap to view full recipe"
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600,
+                      color: cooked ? "var(--text3)" : "var(--text)",
+                      textDecoration: cooked ? "line-through" : "none",
+                    }}>
+                      {recipe.isFreezer && "❄ "}{recipe.title}
+                    </div>
+                    {mult > 1 && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "var(--accentbg)", padding: "2px 7px", borderRadius: 4 }}>
+                        ×{mult}
+                      </span>
+                    )}
+                    {recipe.isFreezer && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--green)", background: "var(--greenbg)", padding: "2px 7px", borderRadius: 4 }}>
+                        📦 {recipe.quantity || 0}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
+                    {((recipe.prepTime || 0) + (recipe.cookTime || 0)) > 0 && (
+                      <Tag>⏱ {(recipe.prepTime || 0) + (recipe.cookTime || 0)} min</Tag>
+                    )}
+                    {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
+                  </div>
+                </div>
+                {/* Per-recipe remove */}
+                <button
+                  style={{ background: "none", fontSize: 13, color: "var(--text3)", padding: 4, flexShrink: 0 }}
+                  onClick={(e) => { e.stopPropagation(); onRemove(day, recipe.id); }}
+                  title="Remove this recipe from the day"
+                >✕</button>
               </div>
-              {mult > 1 && (
-                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "var(--accentbg)", padding: "2px 7px", borderRadius: 4 }}>
-                  ×{mult}
-                </span>
-              )}
-              {recipe.isFreezer && (
-                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--green)", background: "var(--greenbg)", padding: "2px 7px", borderRadius: 4 }}>
-                  📦 {recipe.quantity || 0}
-                </span>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
-              {((recipe.prepTime || 0) + (recipe.cookTime || 0)) > 0 && (
-                <Tag>⏱ {(recipe.prepTime || 0) + (recipe.cookTime || 0)} min</Tag>
-              )}
-              {recipe.skillLevel && <Tag>{recipe.skillLevel}</Tag>}
-            </div>
-          </div>
+            );
+          })}
         </div>
-      ) : (
-        <button
-          style={{
-            width: "100%", padding: "20px 16px",
-            background: "none", color: "var(--text3)",
-            fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            transition: "color 0.2s, background 0.2s",
-          }}
-          onClick={() => onAdd(day)}
-          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--accentbg)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text3)"; e.currentTarget.style.background = "none"; }}
-        >
-          <span style={{ fontSize: 18, lineHeight: 1 }}>+</span> Add recipe
-        </button>
-      )}
+      ))}
+
+      {/* Add recipe button — always visible, even when the day already has items */}
+      <button
+        style={{
+          width: "100%",
+          padding: hasItems ? "10px 16px" : "20px 16px",
+          background: "none", color: "var(--text3)",
+          borderTop: hasItems ? "1px solid var(--border)" : "none",
+          fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          transition: "color 0.2s, background 0.2s",
+        }}
+        onClick={() => onAdd(day)}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--accentbg)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text3)"; e.currentTarget.style.background = "none"; }}
+      >
+        <span style={{ fontSize: 18, lineHeight: 1 }}>+</span> {hasItems ? "Add another recipe" : "Add recipe"}
+      </button>
     </div>
   );
 }
@@ -1413,7 +1590,7 @@ const labelStyle = {
 };
 
 // ─── Books grid — shown under the Library "Books" section ────
-function BooksGrid({ books, library, onOpen, onAddNew }) {
+function BooksGrid({ books, library, onOpen, onAddNew, onDelete }) {
   if (books.length === 0) {
     return (
       <div style={{ textAlign: "center", padding: "40px 20px" }}>
@@ -1434,17 +1611,21 @@ function BooksGrid({ books, library, onOpen, onAddNew }) {
       {books.map((b) => {
         const recipeCount = library.filter((r) => r.bookId === b.id).length;
         return (
-          <button
+          <div
             key={b.id}
-            type="button"
             onClick={() => onOpen(b.id)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(b.id); } }}
             style={{
+              position: "relative",
               background: "var(--bg2)", borderRadius: "var(--radius)",
               border: "1.5px solid var(--border)",
               padding: 0, overflow: "hidden",
               display: "flex", flexDirection: "column",
               textAlign: "left", color: "var(--text)",
               transition: "border-color 0.15s, transform 0.15s",
+              cursor: "pointer",
             }}
             onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--border2)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
@@ -1470,7 +1651,23 @@ function BooksGrid({ books, library, onOpen, onAddNew }) {
                 {recipeCount} {recipeCount === 1 ? "recipe" : "recipes"}
               </div>
             </div>
-          </button>
+            {/* Delete button — sits over the cover; stops propagation so it doesn't open the book */}
+            {onDelete && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onDelete(b); }}
+                title="Delete book"
+                style={{
+                  position: "absolute", top: 6, right: 6,
+                  background: "rgba(0,0,0,0.55)", color: "#fff",
+                  borderRadius: "50%", width: 26, height: 26,
+                  fontSize: 13, lineHeight: 1, fontWeight: 600,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  padding: 0,
+                }}
+              >🗑</button>
+            )}
+          </div>
         );
       })}
       <button
@@ -1605,7 +1802,7 @@ function BookDetail({
 }
 
 // ─── Import page ──────────────────────────────────────────────
-function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
+function ImportPage({ library, books, onImported, onImportedBatch, onAddBook, showBanner }) {
   const [mode, setMode] = useState("link"); // "link" | "custom" | "freezer" | "photo" | "book"
   const [url, setUrl] = useState("");
   const [customName, setCustomName] = useState("");
@@ -1628,6 +1825,8 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
 
   // EPUB upload state — lives inside Book mode
   const epubInputRef = useRef(null);
+  // Second ref for the picker-phase EPUB button (auto-creates a book from the file's metadata).
+  const epubPickerInputRef = useRef(null);
   const [epubStage, setEpubStage] = useState("idle"); // idle | parsing | discovering | review | importing
   const [epubProgress, setEpubProgress] = useState({ done: 0, total: 0 });
   const [epubFoundRecipes, setEpubFoundRecipes] = useState([]); // [{title, pageHint, recipeText, picked}]
@@ -1692,10 +1891,14 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
         ingredients: data.ingredients || [],
         method: customMethod.trim() ? customMethod.trim().split("\n").filter(Boolean) : [],
         favourite: false, menuCount: 0, addedAt: Date.now(),
+        // Custom recipes land in the Dev tab — user can polish them and publish to the library.
+        status: "dev",
+        mine: true,
       });
-      onImported(recipe);
+      // skipPicker — drafts shouldn't prompt to add to this week's menu; user publishes first.
+      onImported(recipe, { skipPicker: true });
       setCustomName(""); setCustomIngredients(""); setCustomMethod(""); setStage("");
-      showBanner(`"${recipe.title}" added to your library!`);
+      showBanner(`"${recipe.title}" saved to Dev — polish & publish when ready`);
     } catch (e) {
       setError("Could not generate recipe. Please check your inputs.");
     }
@@ -1843,6 +2046,60 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
   }
 
   // ── EPUB upload + discovery + batch import ──
+  // Run discovery against an array of text chunks. Processes BATCH at a time in parallel —
+  // Claude can handle the concurrency and a 30-chunk book completes in ~1/3 the time.
+  // Reports progress as each chunk lands. Failed chunks are skipped, never abort the run.
+  async function discoverFromChunks(chunks) {
+    const BATCH = 3;
+    const found = [];
+    const errors = [];
+    let done = 0;
+    setEpubProgress({ done, total: chunks.length });
+    for (let i = 0; i < chunks.length; i += BATCH) {
+      const slice = chunks.slice(i, i + BATCH);
+      const results = await Promise.allSettled(slice.map((c) => discoverRecipesInChunk(c.text)));
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          for (const rec of r.value) {
+            if (rec && rec.title && rec.recipeText) {
+              found.push({
+                title: (rec.title || "").toString(),
+                pageHint: (rec.pageHint || "").toString(),
+                recipeText: (rec.recipeText || "").toString(),
+                picked: true,
+              });
+            }
+          }
+        } else {
+          const msg = r.reason?.message || "unknown error";
+          console.error("Chunk discovery failed:", msg);
+          errors.push(msg);
+        }
+      }
+      done = Math.min(i + BATCH, chunks.length);
+      setEpubProgress({ done, total: chunks.length });
+    }
+    // If every single chunk failed, the EPUB itself is fine — the API call is the problem.
+    // Surface the first error so the user sees the real cause (billing, quota, network, etc.)
+    // instead of a misleading "no recipes found" message.
+    if (errors.length === chunks.length && chunks.length > 0) {
+      const sample = errors[0];
+      // Extract the Anthropic-side message if it's embedded in the wrapped error string.
+      const m = /"message":\s*"([^"]+)"/.exec(sample);
+      const clean = m ? m[1] : sample;
+      throw new Error(`Recipe discovery failed for every section. ${clean}`);
+    }
+    // Deduplicate by title — some EPUBs repeat the index
+    const seen = new Set();
+    const deduped = [];
+    for (const r of found) {
+      const key = r.title.trim().toLowerCase();
+      if (!seen.has(key)) { seen.add(key); deduped.push(r); }
+    }
+    return deduped;
+  }
+
+  // Pick an EPUB AFTER a book is selected — imports into the existing book.
   async function handleEpubFile(fileList) {
     const file = Array.from(fileList || [])[0];
     if (!file) return;
@@ -1861,34 +2118,49 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
     try {
       const chunks = await parseEpubToChunks(file);
       setEpubStage("discovering");
-      setEpubProgress({ done: 0, total: chunks.length });
-      const found = [];
-      for (let i = 0; i < chunks.length; i++) {
-        try {
-          const recipes = await discoverRecipesInChunk(chunks[i].text);
-          for (const r of recipes) {
-            if (r && r.title && r.recipeText) {
-              found.push({
-                title: (r.title || "").toString(),
-                pageHint: (r.pageHint || "").toString(),
-                recipeText: (r.recipeText || "").toString(),
-                picked: true,
-              });
-            }
-          }
-        } catch (e) {
-          // Skip failed chunks; we don't want one bad section to kill the whole import
-          console.error("Chunk discovery failed:", e.message);
-        }
-        setEpubProgress({ done: i + 1, total: chunks.length });
+      const deduped = await discoverFromChunks(chunks);
+      setEpubFoundRecipes(deduped);
+      setEpubStage("review");
+      if (deduped.length === 0) {
+        setEpubError("No recipes were detected in this EPUB. If it's a scanned book, that's expected — try the photo flow instead.");
       }
-      // Deduplicate by title — some EPUBs repeat the index
-      const seen = new Set();
-      const deduped = [];
-      for (const r of found) {
-        const key = r.title.trim().toLowerCase();
-        if (!seen.has(key)) { seen.add(key); deduped.push(r); }
+    } catch (e) {
+      setEpubError(e?.message || "Could not read this EPUB.");
+      setEpubStage("idle");
+    }
+  }
+
+  // Pick an EPUB at the BOOK-PICKER level — auto-creates a book from the EPUB's own
+  // title/author/cover metadata, then runs the same discovery flow.
+  async function handleEpubFileAtPicker(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    if (!/\.epub$/i.test(file.name)) {
+      setEpubError("Please choose a .epub file.");
+      return;
+    }
+    setEpubError("");
+    setEpubImportResults(null);
+    setEpubFoundRecipes([]);
+    setEpubStage("parsing");
+    try {
+      // Open once, reuse for both metadata + chunks (avoids re-unzipping).
+      const opened = await openEpub(file);
+      const meta = await extractEpubMetadata(opened, file.name);
+      const newBookId = await onAddBook({
+        title: meta.title || file.name.replace(/\.epub$/i, "").replace(/[._-]+/g, " ").trim() || "Untitled Cookbook",
+        author: meta.author || "",
+        coverPhoto: meta.coverDataUrl || "",
+      });
+      if (!newBookId) {
+        setEpubError("Couldn't create the book from this EPUB.");
+        setEpubStage("idle");
+        return;
       }
+      setBookSelectedId(newBookId);
+      const chunks = await extractEpubChunks(opened);
+      setEpubStage("discovering");
+      const deduped = await discoverFromChunks(chunks);
       setEpubFoundRecipes(deduped);
       setEpubStage("review");
       if (deduped.length === 0) {
@@ -1915,6 +2187,10 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
     setEpubStage("importing");
     setEpubProgress({ done: 0, total: picked.length });
     let saved = 0, failed = 0;
+    // Collect into an array and commit in one batched setLibrary/saveLibrary call —
+    // calling onImported per-recipe in a loop overwrites state because each call
+    // closes over the same stale `library`.
+    const newRecipes = [];
     for (let i = 0; i < picked.length; i++) {
       const r = picked[i];
       try {
@@ -1943,13 +2219,18 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
           bookId: bookSelectedId,
           pageNumber: pageNum,
         });
-        onImported(recipe, { skipPicker: true });
+        newRecipes.push(recipe);
         saved++;
       } catch (e) {
         console.error("Failed to extract:", r.title, e.message);
         failed++;
       }
       setEpubProgress({ done: i + 1, total: picked.length });
+    }
+    console.log("[EPUB] loop done. newRecipes.length =", newRecipes.length, "saved =", saved, "failed =", failed, "bookSelectedId =", bookSelectedId);
+    if (newRecipes.length) {
+      console.log("[EPUB] sample recipe.bookId:", newRecipes[0]?.bookId, "title:", newRecipes[0]?.title);
+      await onImportedBatch(newRecipes);
     }
     setEpubImportResults({ saved, failed });
     setEpubStage("idle");
@@ -2329,9 +2610,52 @@ function ImportPage({ library, books, onImported, onAddBook, showBanner }) {
                 style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
               >+ New book</button>
 
+              {/* Upload a whole EPUB — auto-creates a book from its metadata and scans for recipes */}
+              <input
+                ref={epubPickerInputRef}
+                type="file"
+                accept=".epub,application/epub+zip"
+                style={{ display: "none" }}
+                onChange={(e) => { handleEpubFileAtPicker(e.target.files); e.target.value = ""; }}
+              />
+              <button
+                type="button"
+                onClick={() => epubPickerInputRef.current?.click()}
+                disabled={epubStage !== "idle"}
+                style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text)", border: "1.5px solid var(--border2)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              >📚 Upload EPUB cookbook</button>
               <div style={{ background: "var(--bg3)", borderRadius: "var(--radius2)", padding: "10px 14px", fontSize: 11, color: "var(--text3)", lineHeight: 1.6, border: "1px dashed var(--border)" }}>
-                PDF / ebook upload — coming soon. For now, snap photos of the pages you want to save.
+                Drops a whole EPUB in — we pull the book's title, author and cover from the file, then scan every chapter for recipes you can pick. Text-based EPUBs only (not scanned).
               </div>
+
+              {/* Show parse / discover progress at the picker level too — the user is still here when discovery runs after auto-creating the book */}
+              {(epubStage === "parsing" || epubStage === "discovering") && (
+                <div style={{
+                  background: "var(--accentbg)", border: "1px solid var(--border2)",
+                  borderRadius: "var(--radius2)", padding: "14px 16px",
+                  display: "flex", flexDirection: "column", gap: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <Spinner />
+                    <span style={{ fontSize: 13, color: "var(--accent2)" }}>
+                      {epubStage === "parsing" && "Reading the EPUB & creating your book..."}
+                      {epubStage === "discovering" && `Scanning for recipes... ${epubProgress.done}/${epubProgress.total} sections`}
+                    </span>
+                  </div>
+                  {epubStage === "discovering" && epubProgress.total > 0 && (
+                    <div style={{ height: 4, background: "var(--bg4)", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${(epubProgress.done / epubProgress.total) * 100}%`,
+                        height: "100%", background: "var(--accent)",
+                        transition: "width 0.3s",
+                      }} />
+                    </div>
+                  )}
+                </div>
+              )}
+              {epubError && epubStage === "idle" && (
+                <div style={{ fontSize: 13, color: "var(--red)", padding: "10px 14px", background: "var(--redbg)", borderRadius: "var(--radius3)" }}>{epubError}</div>
+              )}
             </>
           )}
 
@@ -2913,7 +3237,7 @@ export default function App() {
     try { localStorage.setItem("menu_active_tab", tab); } catch {}
   }, [tab]);
   const [library, setLibrary] = useState([]);
-  const [week, setWeek] = useState(() => Object.fromEntries(DAYS.map((d) => [d, null]))); // {day: recipeId | null}
+  const [week, setWeek] = useState(emptyWeek); // {day: [{id, mult, cooked}, ...]}
   const [shoppingList, setShoppingList] = useState([]); // [{item,category,combinedAmount,entries,checked}]
   const [storageReady, setStorageReady] = useState(false);
   const [banner, setBanner] = useState("");
@@ -2922,6 +3246,9 @@ export default function App() {
   // Library UI state
   const [libSection, setLibSection] = useState("all"); // "all" | "favourites" | cuisine name
   const [libSearch, setLibSearch] = useState("");
+
+  // Dev tab search
+  const [devSearch, setDevSearch] = useState("");
 
   // Menu: recipe picker modal
   const [pickerDay, setPickerDay] = useState(null); // day string or null
@@ -2935,7 +3262,8 @@ export default function App() {
   const [dragTarget, setDragTarget] = useState(null); // day pointer is currently over
 
   // Menu: tap-to-view recipe modal
-  const [viewingDay, setViewingDay] = useState(null);
+  // { day, recipeId } — which recipe on which day is being viewed
+  const [viewingEntry, setViewingEntry] = useState(null);
 
   // Multiplier carried through the day picker (set when a recipe was viewed/scaled before adding)
   const [pendingMult, setPendingMult] = useState(1);
@@ -2949,6 +3277,9 @@ export default function App() {
   // Library state for the Books section: when set, we're drilled into a single book's recipes
   const [bookViewId, setBookViewId] = useState(null);
   const [bookSearch, setBookSearch] = useState("");
+
+  // Weather — keyed by day name, fetched on mount from Open-Meteo
+  const [weatherByDay, setWeatherByDay] = useState({});
 
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
@@ -2974,7 +3305,7 @@ export default function App() {
     clearStoredHouseholdCode();
     setHouseholdCode(null);
     setLibrary([]);
-    setWeek(Object.fromEntries(DAYS.map((d) => [d, null])));
+    setWeek(emptyWeek());
     setShoppingList([]);
     setCleaning([]);
     setPharmacy([]);
@@ -2998,7 +3329,20 @@ export default function App() {
         const cl = await sget(SK.cleaning);
         const ph = await sget(SK.pharmacy);
         const bk = await sget(SK.books);
-        if (lib) setLibrary(lib);
+        // Normalize recipes to backfill course/status defaults on older library entries
+        if (lib) {
+          let normalized = lib.map((r) => normalizeRecipe(r));
+          // One-time dedup: remove "Sausage Roll" when a more specific variant also exists
+          const hasSpecific = normalized.some((r) => /pork.*fennel.*sausage\s+roll|fennel.*pork.*sausage\s+roll/i.test(r.title));
+          if (hasSpecific) {
+            const cleaned = normalized.filter((r) => !/^sausage\s+roll$/i.test(r.title.trim()));
+            if (cleaned.length < normalized.length) {
+              normalized = cleaned;
+              sset(SK.library, normalized);
+            }
+          }
+          setLibrary(normalized);
+        }
         if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
         if (Array.isArray(cl)) setCleaning(cl);
@@ -3013,12 +3357,62 @@ export default function App() {
     return () => { cancelled = true; };
   }, [householdCode]);
 
-  const saveLibrary = useCallback(async (lib) => { await sset(SK.library, lib); }, []);
+  const saveLibrary = useCallback(async (lib, opts) => { await sset(SK.library, lib, opts); }, []);
   const saveWeek = useCallback(async (wk, opts) => { await sset(SK.menu, wk, opts); }, []);
   const saveList = useCallback(async (sl, opts) => { await sset(SK.list, sl, opts); }, []);
   const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
   const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
   const saveBooks = useCallback(async (bk) => { await sset(SK.books, bk); }, []);
+
+  // Fetch Melbourne weather from Open-Meteo (free, no key) once on mount.
+  // Uses Melbourne timezone dates to match forecast days to the DAYS array — fixes the off-by-one
+  // that occurred when day-of-week index was used instead of calendar date matching.
+  useEffect(() => {
+    async function loadWeather() {
+      try {
+        const res = await fetch(
+          "https://api.open-meteo.com/v1/forecast?latitude=-37.8136&longitude=144.9631" +
+          "&daily=weathercode,temperature_2m_max,temperature_2m_min" +
+          "&timezone=Australia%2FMelbourne&forecast_days=14"
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        const { time, weathercode, temperature_2m_max: maxT, temperature_2m_min: minT } = data.daily;
+        const weekDates = getMelbourneWeekDates();
+        const byDay = {};
+        for (const [dayName, dateStr] of Object.entries(weekDates)) {
+          const idx = time.indexOf(dateStr);
+          if (idx !== -1) {
+            byDay[dayName] = { icon: wmoToEmoji(weathercode[idx]), max: Math.round(maxT[idx]), min: Math.round(minT[idx]) };
+          }
+        }
+        setWeatherByDay(byDay);
+      } catch {}
+    }
+    loadWeather();
+  }, []);
+
+  // Auto-clear the week on Sunday at 6pm Melbourne time (AEST/AEDT handled by the timezone name).
+  // Stores the reset date in localStorage so refreshing the page mid-Sunday doesn't double-clear.
+  useEffect(() => {
+    if (!householdCode || !storageReady) return;
+    function checkWeekReset() {
+      const mel = new Date(new Date().toLocaleString("en-US", { timeZone: "Australia/Melbourne" }));
+      if (mel.getDay() !== 0 || mel.getHours() < 18) return;
+      const dateStr = mel.getFullYear() + "-" + String(mel.getMonth() + 1).padStart(2, "0") + "-" + String(mel.getDate()).padStart(2, "0");
+      const key = `menu_week_reset_${dateStr}`;
+      try {
+        if (localStorage.getItem(key)) return;
+        localStorage.setItem(key, "1");
+      } catch { return; }
+      const fresh = emptyWeek();
+      setWeek(fresh);
+      saveWeek(fresh);
+    }
+    checkWeekReset();
+    const id = setInterval(checkWeekReset, 60_000);
+    return () => clearInterval(id);
+  }, [householdCode, storageReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Flush any pending debounced save when the tab is hidden or the page is unloaded.
   // Without this, a tick + immediate close (common on mobile) can lose the save.
@@ -3164,8 +3558,18 @@ export default function App() {
   }
 
   // ── Week / menu ops ──
+  // Append a recipe to a day (multiple recipes per day, grouped by course on render).
   async function assignDay(day, recipeId, mult = 1) {
-    const newWeek = { ...week, [day]: { id: recipeId, mult: Math.max(1, mult || 1) } };
+    const entries = Array.isArray(week[day]) ? week[day] : [];
+    // Don't double-add the same recipe to the same day
+    if (entries.some((e) => e.id === recipeId)) {
+      setPickerDay(null); setPendingMult(1);
+      return;
+    }
+    const newWeek = {
+      ...week,
+      [day]: [...entries, { id: recipeId, mult: Math.max(1, mult || 1), cooked: false }],
+    };
     setWeek(newWeek); setPickerDay(null); setPendingMult(1);
     await saveWeek(newWeek);
     // Bump menuCount
@@ -3178,33 +3582,44 @@ export default function App() {
     rebuildShoppingList(newWeek, lib);
   }
 
-  async function removeFromDay(day) {
-    const newWeek = { ...week, [day]: null };
+  // Remove one recipe from a day. If recipeId is omitted, clears the whole day.
+  async function removeFromDay(day, recipeId) {
+    const entries = Array.isArray(week[day]) ? week[day] : [];
+    const next = recipeId == null ? [] : entries.filter((e) => e.id !== recipeId);
+    const newWeek = { ...week, [day]: next };
     setWeek(newWeek); await saveWeek(newWeek);
     rebuildShoppingList(newWeek, library);
   }
 
-  // Change just the multiplier for a day's existing recipe assignment
-  async function updateDayMult(day, mult) {
-    if (!week[day]) return;
-    const newWeek = { ...week, [day]: { ...week[day], mult: Math.max(1, mult || 1) } };
+  // Change the multiplier for one recipe on one day
+  async function updateDayMult(day, recipeId, mult) {
+    const entries = Array.isArray(week[day]) ? week[day] : [];
+    if (!entries.some((e) => e.id === recipeId)) return;
+    const newWeek = {
+      ...week,
+      [day]: entries.map((e) => e.id === recipeId ? { ...e, mult: Math.max(1, mult || 1) } : e),
+    };
     setWeek(newWeek); await saveWeek(newWeek);
     rebuildShoppingList(newWeek, library);
   }
 
-  // Tick a day as "cooked". Removes its unchecked ingredients from the shopping list
-  // (rebuildShoppingList excludes cooked recipes from the auto list, and already-checked
-  // items are preserved as "stuck" so the user keeps their purchase history).
+  // Tick one recipe on one day as "cooked". Removes its unchecked ingredients from the
+  // shopping list (rebuildShoppingList excludes cooked entries from the auto list, and
+  // already-checked items are preserved as "stuck" so the user keeps their purchase history).
   // If the recipe is a freezer meal, decrement its quantity by 1 (and bump it back up on un-tick).
-  async function toggleCookedDay(day) {
-    const entry = week[day];
+  async function toggleCookedDay(day, recipeId) {
+    const entries = Array.isArray(week[day]) ? week[day] : [];
+    const entry = entries.find((e) => e.id === recipeId);
     if (!entry) return;
     const cooked = !entry.cooked;
-    const newWeek = { ...week, [day]: { ...entry, cooked } };
+    const newWeek = {
+      ...week,
+      [day]: entries.map((e) => e.id === recipeId ? { ...e, cooked } : e),
+    };
     setWeek(newWeek);
     await saveWeek(newWeek, { immediate: true });
     let lib = library;
-    const recipe = library.find((r) => r.id === entry.id);
+    const recipe = library.find((r) => r.id === recipeId);
     // Cooking a recipe on the Menu auto-flags it as madeIt in the library.
     // Untick doesn't reverse it — once you've made it, you've made it.
     // Freezer recipes also get their portion count decremented (or restored on untick).
@@ -3224,10 +3639,10 @@ export default function App() {
     rebuildShoppingList(newWeek, lib);
   }
 
-  // Swap (or move) the recipe between two days
+  // Swap (or move) the recipes between two days — the whole day's list moves together.
   async function swapDays(fromDay, toDay) {
     if (fromDay === toDay) return;
-    const newWeek = { ...week, [fromDay]: week[toDay], [toDay]: week[fromDay] };
+    const newWeek = { ...week, [fromDay]: week[toDay] || [], [toDay]: week[fromDay] || [] };
     setWeek(newWeek);
     await saveWeek(newWeek);
     rebuildShoppingList(newWeek, library);
@@ -3273,10 +3688,10 @@ export default function App() {
   }, [dragSource]); // intentionally only re-bind when source changes
 
   function rebuildShoppingList(wk, lib) {
-    // Exclude cooked days and freezer recipes — freezer meals are pre-made (no shopping needed),
+    // Exclude cooked entries and freezer recipes — freezer meals are pre-made (no shopping needed),
     // cooked recipes are off the to-buy list (user marked them as done).
     const items = DAYS
-      .map((d) => wk[d])
+      .flatMap((d) => Array.isArray(wk[d]) ? wk[d] : [])
       .filter((entry) => entry && !entry.cooked)
       .map((entry) => ({ recipe: lib.find((r) => r.id === entry.id), mult: entry.mult || 1 }))
       .filter((x) => x.recipe && !x.recipe.isFreezer);
@@ -3339,11 +3754,40 @@ export default function App() {
     setPendingRecipe(recipe);
   }
 
+  // Batch insert — used by bulk flows (EPUB import) where calling handleImported
+  // in a loop would corrupt state because each call closes over a stale `library`.
+  async function handleImportedBatch(recipes) {
+    if (!recipes || !recipes.length) return;
+    let updated;
+    setLibrary((prev) => {
+      updated = [...recipes, ...prev];
+      console.log("[BATCH] received", recipes.length, "recipes; prev library size", prev.length, "→ new size", updated.length);
+      return updated;
+    });
+    console.log("[BATCH] calling saveLibrary with", updated.length, "recipes (immediate)");
+    // Immediate save — bypass the 250ms debounce so a tab-hide / visibilitychange
+    // can't flush our payload through `fetch(..., keepalive: true)` which silently
+    // drops bodies > 64KB. 118 recipes blow past that easily.
+    await saveLibrary(updated, { immediate: true });
+    console.log("[BATCH] saveLibrary returned");
+  }
+
+  // Move a Dev recipe into the published Library.
+  async function publishRecipe(id) {
+    const lib = library.map((r) => r.id === id ? { ...r, status: "published" } : r);
+    setLibrary(lib);
+    await saveLibrary(lib);
+    const r = lib.find((x) => x.id === id);
+    if (r) showBanner(`"${r.title}" published to your library`);
+  }
+
   const [pendingRecipe, setPendingRecipe] = useState(null);
 
   // ── Derived ──
   const recipeById = (id) => library.find((r) => r.id === id);
-  const menuRecipeIds = new Set(DAYS.map((d) => week[d]?.id).filter(Boolean));
+  const menuRecipeIds = new Set(
+    DAYS.flatMap((d) => Array.isArray(week[d]) ? week[d].map((e) => e.id) : [])
+  );
 
   function recipeMatchesQuery(r, q) {
     if (!q) return true;
@@ -3357,7 +3801,9 @@ export default function App() {
 
   // Recipes that belong to a book are hidden from the main library list — they live
   // inside their book and are only shown when drilled into that book's detail view.
+  // Dev recipes (status === "dev") live in the Dev tab, not the published Library.
   const libFiltered = library.filter((r) => {
+    if (r.status === "dev") return false;
     if (!recipeMatchesQuery(r, libSearch)) return false;
     if (libSection === "favourites") return r.favourite;
     if (libSection === "freezer") return r.isFreezer;
@@ -3391,16 +3837,23 @@ export default function App() {
         })
     : [];
 
-  const freezerInventory = library.filter((r) => r.isFreezer);
+  // Recipes the user is still working on — surfaced in the Dev tab.
+  const devLibrary = library
+    .filter((r) => r.status === "dev" && recipeMatchesQuery(r, devSearch))
+    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
 
-  const usedCuisines = [...new Set(library.map((r) => r.cuisine).filter(Boolean))];
-  const whatsNew = [...library].sort((a, b) => b.addedAt - a.addedAt).slice(0, 5);
+  const freezerInventory = library.filter((r) => r.isFreezer && r.status !== "dev");
+
+  const publishedLibrary = library.filter((r) => r.status !== "dev");
+  const usedCuisines = [...new Set(publishedLibrary.map((r) => r.cuisine).filter(Boolean))];
+  const whatsNew = [...publishedLibrary].sort((a, b) => b.addedAt - a.addedAt).slice(0, 5);
   const checkedCount = shoppingList.filter((i) => i.checked).length;
 
   const TABS = [
     { id: "menu", label: "Menu", icon: "📅" },
     { id: "library", label: "Library", icon: "📚" },
     { id: "list", label: "List", icon: "🛒" },
+    { id: "dev", label: "Dev", icon: "🧪" },
     { id: "import", label: "Import", icon: "＋" },
   ];
 
@@ -3500,20 +3953,23 @@ export default function App() {
               </div>
               <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 18 }}>Add it to this week's menu?</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-                {DAYS.map((d) => (
-                  <button key={d} style={{
-                    padding: "9px 12px", borderRadius: "var(--radius3)",
-                    background: week[d] ? "var(--bg4)" : "var(--bg3)",
-                    color: week[d] ? "var(--text3)" : "var(--text)",
-                    fontSize: 13, fontWeight: 500,
-                    border: `1.5px solid ${week[d] ? "var(--border)" : "var(--border2)"}`,
-                    cursor: week[d] ? "not-allowed" : "pointer",
-                    textAlign: "left",
-                  }} onClick={() => { if (!week[d]) { assignDay(d, pendingRecipe.id); setPendingRecipe(null); setPickerDay(null); setTab("menu"); }}}
-                  >
-                    {d} {week[d] ? <span style={{ color: "var(--text3)", fontSize: 11 }}>(taken)</span> : ""}
-                  </button>
-                ))}
+                {DAYS.map((d) => {
+                  const count = (week[d] || []).length;
+                  return (
+                    <button key={d} style={{
+                      padding: "9px 12px", borderRadius: "var(--radius3)",
+                      background: "var(--bg3)",
+                      color: "var(--text)",
+                      fontSize: 13, fontWeight: 500,
+                      border: `1.5px solid var(--border2)`,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }} onClick={() => { assignDay(d, pendingRecipe.id); setPendingRecipe(null); setPickerDay(null); setTab("menu"); }}
+                    >
+                      {d} {count > 0 && <span style={{ color: "var(--text3)", fontSize: 11 }}>· {count} on it</span>}
+                    </button>
+                  );
+                })}
               </div>
               <button style={{ ...btnStyle, background: "var(--bg4)", color: "var(--text2)", width: "100%" }}
                 onClick={() => { setPendingRecipe(null); setPickerDay(null); }}>
@@ -3524,15 +3980,19 @@ export default function App() {
         )}
 
         {/* Recipe viewer modal — tap a day's card on the Menu tab to open */}
-        {viewingDay && week[viewingDay] && (
-          <RecipeViewer
-            recipe={recipeById(week[viewingDay].id)}
-            day={viewingDay}
-            mult={week[viewingDay].mult || 1}
-            onMultChange={(m) => updateDayMult(viewingDay, m)}
-            onClose={() => setViewingDay(null)}
-          />
-        )}
+        {viewingEntry && (() => {
+          const entry = (week[viewingEntry.day] || []).find((e) => e.id === viewingEntry.recipeId);
+          if (!entry) return null;
+          return (
+            <RecipeViewer
+              recipe={recipeById(entry.id)}
+              day={viewingEntry.day}
+              mult={entry.mult || 1}
+              onMultChange={(m) => updateDayMult(viewingEntry.day, entry.id, m)}
+              onClose={() => setViewingEntry(null)}
+            />
+          );
+        })()}
 
         {/* Recipe picker modal (for menu day add) */}
         {pickerDay && pickerDay !== "__new__" && (
@@ -3594,14 +4054,15 @@ export default function App() {
                       <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
                         {filtered.map((r) => {
                           const onDays = Object.entries(week)
-                            .filter(([d, entry]) => entry?.id === r.id && d !== pickerDay)
+                            .filter(([d, entries]) => Array.isArray(entries) && entries.some((e) => e.id === r.id) && d !== pickerDay)
                             .map(([d]) => d);
+                          const alreadyOnThisDay = (week[pickerDay] || []).some((e) => e.id === r.id);
                           const outOfStock = r.isFreezer && (r.quantity || 0) <= 0;
                           return (
                             <div key={r.id} style={{
                               padding: "12px 14px", borderRadius: "var(--radius3)",
                               background: "var(--bg3)",
-                              border: `1.5px solid ${week[pickerDay]?.id === r.id ? "var(--accent)" : "var(--border)"}`,
+                              border: `1.5px solid ${alreadyOnThisDay ? "var(--accent)" : "var(--border)"}`,
                               cursor: "pointer", transition: "border-color 0.15s",
                               opacity: outOfStock ? 0.55 : 1,
                             }} onClick={() => { assignDay(pickerDay, r.id, pendingMult); setPickerSearch(""); }}>
@@ -3610,11 +4071,13 @@ export default function App() {
                               </div>
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                 {r.isFreezer && <Tag>📦 {r.quantity || 0} in freezer</Tag>}
+                                {(r.course || DEFAULT_COURSE) !== DEFAULT_COURSE && <Tag>{r.course}</Tag>}
                                 {r.cuisine && <Tag>{r.cuisine}</Tag>}
                                 {((r.prepTime || 0) + (r.cookTime || 0)) > 0 && <Tag>⏱ {(r.prepTime || 0) + (r.cookTime || 0)} min</Tag>}
                                 {r.skillLevel && <Tag>{r.skillLevel}</Tag>}
+                                {alreadyOnThisDay && <Tag>✓ on this day</Tag>}
                                 {onDays.length > 0 && (
-                                  <Tag>📅 already on {onDays.map((d) => d.slice(0, 3)).join(", ")}</Tag>
+                                  <Tag>📅 also on {onDays.map((d) => d.slice(0, 3)).join(", ")}</Tag>
                                 )}
                               </div>
                             </div>
@@ -3638,7 +4101,7 @@ export default function App() {
               <div style={{ marginBottom: 20 }}>
                 <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>This Week</div>
                 <div style={{ fontSize: 13, color: "var(--text2)" }}>
-                  {DAYS.filter((d) => week[d]).length} of 7 nights planned
+                  {DAYS.filter((d) => (week[d] || []).length > 0).length} of 7 nights planned
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -3646,20 +4109,20 @@ export default function App() {
                   <DayCard
                     key={day}
                     day={day}
-                    recipe={week[day] ? recipeById(week[day].id) : null}
-                    mult={week[day]?.mult || 1}
-                    cooked={!!week[day]?.cooked}
+                    entries={week[day] || []}
+                    recipes={library}
                     onAdd={(d) => setPickerDay(d)}
                     onRemove={removeFromDay}
-                    onView={(d) => setViewingDay(d)}
+                    onView={(d, recipeId) => setViewingEntry({ day: d, recipeId })}
                     onToggleCooked={toggleCookedDay}
                     onDragStart={startDayDrag}
                     isDragging={dragSource === day}
                     isTarget={dragTarget === day && dragSource !== day}
+                    weather={weatherByDay[day]}
                   />
                 ))}
               </div>
-              {DAYS.some((d) => week[d]) && (
+              {DAYS.some((d) => (week[d] || []).length > 0) && (
                 <button
                   style={{ ...btnStyle, background: "var(--accent)", color: "#fff", width: "100%", marginTop: 16, fontSize: 14 }}
                   onClick={() => { rebuildShoppingList(week, library); setTab("list"); showBanner("Shopping list updated!"); }}
@@ -3795,6 +4258,13 @@ export default function App() {
                   library={library}
                   onOpen={(id) => { setBookViewId(id); setBookSearch(""); }}
                   onAddNew={() => setTab("import")}
+                  onDelete={async (b) => {
+                    const count = library.filter((r) => r.bookId === b.id).length;
+                    const msg = count > 0
+                      ? `Delete "${b.title}" and its ${count} ${count === 1 ? "recipe" : "recipes"}? This can't be undone.`
+                      : `Delete "${b.title}"? This can't be undone.`;
+                    if (confirm(msg)) await deleteBook(b.id);
+                  }}
                 />
               )}
 
@@ -3808,7 +4278,7 @@ export default function App() {
                   totalInBook={library.filter((r) => r.bookId === activeBook.id).length}
                   menuRecipeIds={menuRecipeIds}
                   onBack={() => { setBookViewId(null); setBookSearch(""); }}
-                  onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
+                  onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => (week[d] || []).length === 0) || DAYS[0]); }}
                   onToggleFav={toggleFav}
                   onToggleMade={toggleMade}
                   onDeleteRecipe={deleteRecipe}
@@ -3837,7 +4307,7 @@ export default function App() {
                       key={r.id}
                       recipe={r}
                       isOnMenu={menuRecipeIds.has(r.id)}
-                      onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => !week[d]) || DAYS[0]); }}
+                      onAddToMenu={(recipe, mult = 1) => { setPendingMult(mult); setPickerDay(DAYS.find((d) => (week[d] || []).length === 0) || DAYS[0]); }}
                       onToggleFav={toggleFav}
                       onToggleMade={toggleMade}
                       onDelete={deleteRecipe}
@@ -3872,6 +4342,69 @@ export default function App() {
             </div>
           )}
 
+          {/* ══ DEV TAB ══ — drafts of your own recipes, not yet in the published library */}
+          {tab === "dev" && (
+            <div className="fade-up">
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Dev</div>
+                <div style={{ fontSize: 13, color: "var(--text2)" }}>
+                  {devLibrary.length} draft{devLibrary.length !== 1 ? "s" : ""} · custom recipes you're still working on
+                </div>
+              </div>
+
+              {/* Search — only show once there's something to search */}
+              {library.some((r) => r.status === "dev") && (
+                <input
+                  style={{ ...inputStyle, marginBottom: 16 }}
+                  placeholder="Search drafts..."
+                  value={devSearch}
+                  onChange={(e) => setDevSearch(e.target.value)}
+                />
+              )}
+
+              {devLibrary.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "60px 20px" }}>
+                  <div style={{ fontSize: 48, marginBottom: 16 }}>🧪</div>
+                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, marginBottom: 8 }}>
+                    {library.some((r) => r.status === "dev") ? `No drafts match "${devSearch}"` : "No drafts yet"}
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, maxWidth: 320, margin: "0 auto 20px" }}>
+                    Use the <span style={{ color: "var(--accent)" }}>Custom Recipe</span> option on the Import tab to start a draft. Drafts stay here until you publish them.
+                  </div>
+                  <button style={{ ...btnStyle, background: "var(--accent)", color: "#fff" }} onClick={() => setTab("import")}>
+                    Go to Import →
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {devLibrary.map((r) => (
+                    <div key={r.id} style={{ position: "relative" }}>
+                      <RecipeCard
+                        recipe={r}
+                        isOnMenu={false}
+                        onAddToMenu={() => {/* drafts aren't addable to the menu — publish first */}}
+                        onToggleFav={toggleFav}
+                        onToggleMade={toggleMade}
+                        onDelete={deleteRecipe}
+                        onEdit={updateRecipe}
+                        onAdjustQuantity={(recipe, delta) => {
+                          const next = Math.max(0, (recipe.quantity || 0) + delta);
+                          updateRecipe({ ...recipe, quantity: next });
+                        }}
+                      />
+                      <div style={{ display: "flex", gap: 8, padding: "0 4px 4px", marginTop: -2 }}>
+                        <button
+                          style={{ ...btnStyle, background: "var(--accent)", color: "#fff", flex: 1, fontSize: 13 }}
+                          onClick={() => publishRecipe(r.id)}
+                        >🚀 Publish to Library</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ══ LIST TAB ══ */}
           {tab === "list" && (
             <div className="fade-up">
@@ -3879,7 +4412,7 @@ export default function App() {
                 <div>
                   <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Shopping List</div>
                   <div style={{ fontSize: 13, color: "var(--text2)" }}>
-                    {DAYS.filter((d) => week[d]).length} recipes · {shoppingList.length} items
+                    {DAYS.filter((d) => (week[d] || []).length > 0).length} recipes · {shoppingList.length} items
                   </div>
                 </div>
                 {checkedCount > 0 && (
@@ -4014,6 +4547,7 @@ export default function App() {
               library={library}
               books={books}
               onImported={handleImported}
+              onImportedBatch={handleImportedBatch}
               onAddBook={addBook}
               showBanner={showBanner}
             />
