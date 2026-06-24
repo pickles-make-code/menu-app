@@ -1312,43 +1312,13 @@ function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClos
   );
 }
 
-// ─── Weather helpers ─────────────────────────────────────────
-function wmoToEmoji(code) {
-  if (code === 0) return "☀️";
-  if (code <= 3) return "⛅";
-  if (code <= 48) return "🌫️";
-  if (code <= 57) return "🌦️";
-  if (code <= 67) return "🌧️";
-  if (code <= 77) return "🌨️";
-  if (code <= 82) return "🌦️";
-  if (code <= 99) return "⛈️";
-  return "🌡️";
-}
-
-// Returns { Monday: "2026-06-23", ..., Sunday: "2026-06-29" } for the current Melbourne week.
-// Uses Melbourne wall-clock time so dates are always correct regardless of server/browser timezone.
-function getMelbourneWeekDates() {
-  const melbNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Australia/Melbourne" }));
-  const todayDow = melbNow.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-  const daysFromMonday = (todayDow + 6) % 7; // 0 on Monday, 6 on Sunday
-  const result = {};
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(melbNow);
-    d.setDate(melbNow.getDate() - daysFromMonday + i);
-    result[DAYS[i]] = d.getFullYear() + "-" +
-      String(d.getMonth() + 1).padStart(2, "0") + "-" +
-      String(d.getDate()).padStart(2, "0");
-  }
-  return result;
-}
-
 // Day card for Menu tab
 // Drag is driven by Pointer Events at the App level so it works on mouse + touch.
 // `isDragging` = this card is the drag source, `isTarget` = pointer is currently over this card.
 // Day card on the Menu tab — holds an array of entries (one per recipe assigned to this day).
 // Recipes are grouped by course (Starter / Main / Side / Dessert) and rendered under their heading.
 // Each entry has its own cooked checkbox and remove button; the whole day still drags as a unit.
-function DayCard({ day, entries = [], recipes = [], onAdd, onRemove, onView, onToggleCooked, onDragStart, isDragging, isTarget, weather }) {
+function DayCard({ day, entries = [], recipes = [], onAdd, onRemove, onView, onToggleCooked, onDragStart, isDragging, isTarget }) {
   // Pair entries with their recipe, drop ghosts (recipe deleted).
   const items = entries
     .map((entry) => ({ entry, recipe: recipes.find((r) => r.id === entry.id) }))
@@ -1385,29 +1355,22 @@ function DayCard({ day, entries = [], recipes = [], onAdd, onRemove, onView, onT
         <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.8px", textTransform: "uppercase", color: allCooked ? "var(--green)" : "var(--accent)" }}>
           {day}{allCooked && " · Cooked"}
         </span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {weather && (
-            <span style={{ fontSize: 12, color: "var(--text3)", fontWeight: 500, letterSpacing: 0 }}>
-              {weather.icon} {weather.max}°
-            </span>
-          )}
-          {hasItems && (
-            <div
-              onPointerDown={(e) => {
-                if (e.pointerType === "mouse" && e.button !== 0) return;
-                e.preventDefault();
-                e.stopPropagation();
-                onDragStart(day, e.clientX, e.clientY);
-              }}
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                color: "var(--text3)", fontSize: 16, lineHeight: 1,
-                cursor: "grab", touchAction: "none", padding: "4px 4px", userSelect: "none",
-              }}
-              title="Drag to swap with another day"
-            >⋮⋮</div>
-          )}
-        </div>
+        {hasItems && (
+          <div
+            onPointerDown={(e) => {
+              if (e.pointerType === "mouse" && e.button !== 0) return;
+              e.preventDefault();
+              e.stopPropagation();
+              onDragStart(day, e.clientX, e.clientY);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              color: "var(--text3)", fontSize: 16, lineHeight: 1,
+              cursor: "grab", touchAction: "none", padding: "4px 4px", userSelect: "none",
+            }}
+            title="Drag to swap with another day"
+          >⋮⋮</div>
+        )}
       </div>
 
       {/* Course groups */}
@@ -3278,9 +3241,6 @@ export default function App() {
   const [bookViewId, setBookViewId] = useState(null);
   const [bookSearch, setBookSearch] = useState("");
 
-  // Weather — keyed by day name, fetched on mount from Open-Meteo
-  const [weatherByDay, setWeatherByDay] = useState({});
-
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
   const [loadError, setLoadError] = useState("");
@@ -3330,19 +3290,7 @@ export default function App() {
         const ph = await sget(SK.pharmacy);
         const bk = await sget(SK.books);
         // Normalize recipes to backfill course/status defaults on older library entries
-        if (lib) {
-          let normalized = lib.map((r) => normalizeRecipe(r));
-          // One-time dedup: remove "Sausage Roll" when a more specific variant also exists
-          const hasSpecific = normalized.some((r) => /pork.*fennel.*sausage\s+roll|fennel.*pork.*sausage\s+roll/i.test(r.title));
-          if (hasSpecific) {
-            const cleaned = normalized.filter((r) => !/^sausage\s+roll$/i.test(r.title.trim()));
-            if (cleaned.length < normalized.length) {
-              normalized = cleaned;
-              sset(SK.library, normalized);
-            }
-          }
-          setLibrary(normalized);
-        }
+        if (lib) setLibrary(lib.map((r) => normalizeRecipe(r)));
         if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
         if (Array.isArray(cl)) setCleaning(cl);
@@ -3363,56 +3311,6 @@ export default function App() {
   const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
   const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
   const saveBooks = useCallback(async (bk) => { await sset(SK.books, bk); }, []);
-
-  // Fetch Melbourne weather from Open-Meteo (free, no key) once on mount.
-  // Uses Melbourne timezone dates to match forecast days to the DAYS array — fixes the off-by-one
-  // that occurred when day-of-week index was used instead of calendar date matching.
-  useEffect(() => {
-    async function loadWeather() {
-      try {
-        const res = await fetch(
-          "https://api.open-meteo.com/v1/forecast?latitude=-37.8136&longitude=144.9631" +
-          "&daily=weathercode,temperature_2m_max,temperature_2m_min" +
-          "&timezone=Australia%2FMelbourne&forecast_days=14"
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        const { time, weathercode, temperature_2m_max: maxT, temperature_2m_min: minT } = data.daily;
-        const weekDates = getMelbourneWeekDates();
-        const byDay = {};
-        for (const [dayName, dateStr] of Object.entries(weekDates)) {
-          const idx = time.indexOf(dateStr);
-          if (idx !== -1) {
-            byDay[dayName] = { icon: wmoToEmoji(weathercode[idx]), max: Math.round(maxT[idx]), min: Math.round(minT[idx]) };
-          }
-        }
-        setWeatherByDay(byDay);
-      } catch {}
-    }
-    loadWeather();
-  }, []);
-
-  // Auto-clear the week on Sunday at 6pm Melbourne time (AEST/AEDT handled by the timezone name).
-  // Stores the reset date in localStorage so refreshing the page mid-Sunday doesn't double-clear.
-  useEffect(() => {
-    if (!householdCode || !storageReady) return;
-    function checkWeekReset() {
-      const mel = new Date(new Date().toLocaleString("en-US", { timeZone: "Australia/Melbourne" }));
-      if (mel.getDay() !== 0 || mel.getHours() < 18) return;
-      const dateStr = mel.getFullYear() + "-" + String(mel.getMonth() + 1).padStart(2, "0") + "-" + String(mel.getDate()).padStart(2, "0");
-      const key = `menu_week_reset_${dateStr}`;
-      try {
-        if (localStorage.getItem(key)) return;
-        localStorage.setItem(key, "1");
-      } catch { return; }
-      const fresh = emptyWeek();
-      setWeek(fresh);
-      saveWeek(fresh);
-    }
-    checkWeekReset();
-    const id = setInterval(checkWeekReset, 60_000);
-    return () => clearInterval(id);
-  }, [householdCode, storageReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Flush any pending debounced save when the tab is hidden or the page is unloaded.
   // Without this, a tick + immediate close (common on mobile) can lose the save.
@@ -4118,7 +4016,6 @@ export default function App() {
                     onDragStart={startDayDrag}
                     isDragging={dragSource === day}
                     isTarget={dragTarget === day && dragSource !== day}
-                    weather={weatherByDay[day]}
                   />
                 ))}
               </div>
