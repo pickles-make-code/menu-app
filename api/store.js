@@ -59,8 +59,11 @@ export default async function handler(req, res) {
         books: Array.isArray(books) ? books : [],
         _updatedAt: Date.now(),
       };
+      const bytes = JSON.stringify(payload).length;
+      console.log(`[store POST] code=${code} libraryRecipes=${payload.library.length} books=${payload.books.length} payloadBytes=${bytes}`);
       // @upstash/redis auto-serializes objects via JSON
       await redis.set(key(code), payload);
+      console.log(`[store POST] redis.set OK for code=${code}`);
       return res.status(200).json({ ok: true });
     }
 
