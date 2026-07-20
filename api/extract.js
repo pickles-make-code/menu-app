@@ -108,7 +108,7 @@ Rules:
 - Do NOT return the method in the JSON output.`;
 
   try {
-    const data = await callClaude(prompt, ANTHROPIC_KEY, { max_tokens: 600 });
+    const data = await callClaude(prompt, ANTHROPIC_KEY, { model: "claude-sonnet-4-6-20251001", max_tokens: 800 });
     return res.status(200).json(data);
   } catch (err) {
     console.error("Custom recipe failed:", err.message);
