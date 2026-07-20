@@ -590,7 +590,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
                 </div>
               )}
               {recipe.mine && <Badge color="var(--accent)">✍ Mine</Badge>}
-              {recipe.madeIt && <Badge color="var(--green)">🍳 Made</Badge>}
+              {recipe.madeIt && <Badge color="var(--green)">✓ Made</Badge>}
               {recipe.course && recipe.course !== DEFAULT_COURSE && <Tag>{recipe.course}</Tag>}
               {recipe.cuisine && <Tag>{recipe.cuisine}</Tag>}
               {totalTime > 0 && <Tag>⏱ {totalTime} min</Tag>}
@@ -610,7 +610,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
               style={{ background: "none", fontSize: 15, padding: 4, color: recipe.madeIt ? "var(--green)" : "var(--text3)", transition: "color 0.2s" }}
               onClick={() => onToggleMade && onToggleMade(recipe.id)}
               title={recipe.madeIt ? "Made it (tap to unmark)" : "Mark as made"}
-            >🍳</button>
+            >✓</button>
             <button
               style={{ background: "none", fontSize: 15, padding: 4, color: "var(--text3)", transition: "color 0.2s" }}
               onClick={startEdit}
@@ -676,7 +676,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
                 onChange={(e) => setEditData({ ...editData, madeIt: e.target.checked })}
                 style={{ width: 16, height: 16, accentColor: "var(--green)" }}
               />
-              🍳 I've made this
+              ✓ I've made this
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text2)", cursor: "pointer" }}>
               <input
@@ -2415,7 +2415,6 @@ export default function App() {
 
   const publishedLibrary = library.filter((r) => r.status !== "dev");
   const usedCuisines = [...new Set(publishedLibrary.map((r) => r.cuisine).filter(Boolean))];
-  const whatsNew = [...publishedLibrary].sort((a, b) => b.addedAt - a.addedAt).slice(0, 5);
   const checkedCount = shoppingList.filter((i) => i.checked).length
     + cleaning.filter((i) => i.checked).length
     + pharmacy.filter((i) => i.checked).length;
@@ -2716,27 +2715,6 @@ export default function App() {
                 <input style={{ ...inputStyle, marginBottom: 16 }} placeholder="Search recipes..." value={libSearch} onChange={(e) => setLibSearch(e.target.value)} />
               )}
 
-              {/* What's new */}
-              {!libSearch && whatsNew.length > 0 && (
-                <div style={{ marginBottom: 24 }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 10 }}>What's New</div>
-                  <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
-                    {whatsNew.map((r) => (
-                      <div key={r.id} style={{
-                        flexShrink: 0, width: 160, background: "var(--bg3)",
-                        borderRadius: "var(--radius2)", padding: "12px 14px",
-                        border: "1px solid var(--border2)",
-                      }}>
-                        <div style={{ fontSize: 11, color: platformColor(r.platform) || "var(--accent)", marginBottom: 4 }}>
-                          {platformIcon(r.platform)} {platformLabel(r.platform)}
-                        </div>
-                        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>{r.title}</div>
-                        {r.cuisine && <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4 }}>{r.cuisine}</div>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Freezer inventory — quick at-a-glance with +/- adjusters per meal */}
               {!libSearch && freezerInventory.length > 0 && (
