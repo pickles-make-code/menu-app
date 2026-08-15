@@ -108,7 +108,7 @@ Rules:
 - Do NOT return the method in the JSON output.`;
 
   try {
-    const data = await callClaude(prompt, ANTHROPIC_KEY, { model: "claude-sonnet-4-6-20251001", max_tokens: 800 });
+    const data = await callClaude(prompt, ANTHROPIC_KEY, { model: "claude-sonnet-4-6", max_tokens: 800 });
     return res.status(200).json(data);
   } catch (err) {
     console.error("Custom recipe failed:", err.message);
@@ -685,7 +685,7 @@ Rules:
   const visionContent = [...imageBlocks, { type: "text", text: prompt }];
 
   try {
-    const data = await callClaude(visionContent, ANTHROPIC_KEY, { model: "claude-sonnet-4-6-20251001", max_tokens: 1500 });
+    const data = await callClaude(visionContent, ANTHROPIC_KEY, { model: "claude-sonnet-4-6", max_tokens: 1500 });
     return res.status(200).json({ ...data, _source: "Photo" });
   } catch (err) {
     console.error("Photo extract failed:", err.message);
