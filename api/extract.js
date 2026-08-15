@@ -62,7 +62,7 @@ export default async function handler(req, res) {
       });
     }
     const prompt = buildExtractPrompt(gathered);
-    const data = await callClaude(prompt, ANTHROPIC_KEY, { max_tokens: 800 });
+    const data = await callClaude(prompt, ANTHROPIC_KEY, { max_tokens: 2000 });
     return res.status(200).json({
       ...data,
       _source: gathered.platform,

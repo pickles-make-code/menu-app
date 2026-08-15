@@ -65,7 +65,7 @@ Counts checked items across grocery + cleaning + pharmacy. The single "Clear che
 Link → URL scrape + Claude (Haiku) | Custom → Claude structuring (Sonnet) | Photo → base64 + Claude vision (Sonnet) | Freezer → local only
 
 ### Model routing in api/extract.js
-- URL extraction: Haiku, max_tokens 800
+- URL extraction: Haiku, max_tokens 2000 (needs room for method array on long recipes)
 - Custom recipe: Sonnet, max_tokens 800 — must stay Sonnet; Haiku misclassifies freetext ingredients (all fall through to `dry` default)
 - Photo OCR: Sonnet, max_tokens 1500
 
