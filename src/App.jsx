@@ -419,10 +419,10 @@ const THEME = `
     --text:      #f0ebe3;
     --text2:     #a89f94;
     --text3:     #6b6560;
-    --accent:    #d4884a;
-    --accent2:   #e8a96a;
-    --accentbg:  rgba(212,136,74,0.12);
-    --accentbg2: rgba(212,136,74,0.2);
+    --accent:    #6b8e5a;
+    --accent2:   #87a670;
+    --accentbg:  rgba(107,142,90,0.14);
+    --accentbg2: rgba(107,142,90,0.22);
     --green:     #6db580;
     --greenbg:   rgba(109,181,128,0.12);
     --red:       #c0524a;
@@ -2436,7 +2436,7 @@ export default function App() {
   return (
     <>
       <style>{THEME}</style>
-      <div style={{ minHeight: "100vh", background: "var(--bg)", paddingBottom: 80 }}>
+      <div style={{ minHeight: "100vh", background: "var(--bg)", paddingBottom: "calc(80px + env(safe-area-inset-bottom))" }}>
 
         {/* Header */}
         <header style={{
@@ -2482,21 +2482,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {/* Tab bar */}
-            <div style={{ display: "flex", marginTop: 10 }}>
-              {TABS.map((t) => (
-                <button key={t.id} onClick={() => setTab(t.id)} style={{
-                  flex: 1, padding: "10px 4px 12px",
-                  border: "none", borderBottom: `2.5px solid ${tab === t.id ? "var(--accent)" : "transparent"}`,
-                  background: "transparent",
-                  fontSize: 12, fontWeight: 600, letterSpacing: "0.3px",
-                  color: tab === t.id ? "var(--accent)" : "var(--text3)",
-                  transition: "all 0.2s",
-                }}>
-                  <span style={{ marginRight: 5 }}>{t.icon}</span>{t.label}
-                </button>
-              ))}
-            </div>
+            <div style={{ height: 14 }} />
           </div>
         </header>
 
@@ -3053,6 +3039,30 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* Bottom tab bar */}
+      <nav style={{
+        position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
+        background: "rgba(28,26,24,0.95)", backdropFilter: "blur(16px)",
+        borderTop: "1px solid var(--border)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}>
+        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex" }}>
+          {TABS.map((t) => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              flex: 1, padding: "10px 4px 12px",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+              border: "none", background: "transparent",
+              fontSize: 11, fontWeight: 600, letterSpacing: "0.3px",
+              color: tab === t.id ? "var(--accent)" : "var(--text3)",
+              transition: "color 0.2s",
+            }}>
+              <span style={{ fontSize: 20, lineHeight: 1 }}>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </nav>
     </>
   );
 }
