@@ -407,7 +407,7 @@ function generateHouseholdCode() {
 
 // ─── CSS Variables injected globally ─────────────────────────
 const THEME = `
-  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
 
   :root {
     --bg:        #1c1a18;
@@ -435,7 +435,7 @@ const THEME = `
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; }
+  body { background: var(--bg); color: var(--text); font-family: 'Outfit', system-ui, sans-serif; }
 
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes fadeUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
@@ -448,7 +448,7 @@ const THEME = `
     color: var(--text);
     border: 1.5px solid var(--border2);
     border-radius: var(--radius3);
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Outfit', system-ui, sans-serif;
     font-size: 14px;
     outline: none;
     transition: border-color 0.2s;
@@ -456,7 +456,7 @@ const THEME = `
   input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   input::placeholder, textarea::placeholder { color: var(--text3); }
 
-  button { font-family: 'DM Sans', sans-serif; cursor: pointer; border: none; }
+  button { font-family: 'Outfit', system-ui, sans-serif; cursor: pointer; border: none; }
 
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -565,7 +565,7 @@ function RecipeCard({ recipe, onAddToMenu, onToggleFav, onToggleMade, onDelete, 
               {recipe.favourite && <span style={{ fontSize: 14 }}>⭐</span>}
               {recipe.isFreezer && <span style={{ fontSize: 14 }}>❄</span>}
               <span style={{
-                fontFamily: "'Playfair Display', serif",
+                fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em",
                 fontSize: 16, fontWeight: 600, color: "var(--text)",
               }}>{recipe.title}</span>
               {isOnMenu && <Badge color="var(--green)">On menu</Badge>}
@@ -975,7 +975,7 @@ function RecipeViewer({ recipe, day, mult: initialMult = 1, onMultChange, onClos
                   {day}
                 </div>
               )}
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+              <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 20, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
                 {recipe.favourite && <span style={{ fontSize: 16, marginRight: 6 }}>⭐</span>}
                 {recipe.title}
               </div>
@@ -1176,7 +1176,7 @@ function DayCard({ day, entries = [], recipes = [], onAdd, onRemove, onView, onT
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
                     <div style={{
-                      fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600,
+                      fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 14, fontWeight: 600,
                       color: cooked ? "var(--text3)" : "var(--text)",
                       textDecoration: cooked ? "line-through" : "none",
                     }}>
@@ -1479,7 +1479,7 @@ function ImportPage({ library, onImported, showBanner }) {
   return (
     <div style={{ padding: "0 0 40px" }}>
       <div style={{ marginBottom: 24 }}>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Import</div>
+        <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Import</div>
         <div style={{ fontSize: 13, color: "var(--text2)" }}>Paste any recipe link, or write your own</div>
       </div>
 
@@ -1879,7 +1879,7 @@ function SetupScreen({ onSetup, hasLegacyData }) {
           border: "1.5px solid var(--border)",
           padding: 28, maxWidth: 420, width: "100%", boxShadow: "var(--shadow)",
         }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 700, marginBottom: 6 }}>
+          <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 28, fontWeight: 700, marginBottom: 6 }}>
             Menu<span style={{ color: "var(--accent)" }}>.</span>
           </div>
           <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 22, lineHeight: 1.55 }}>
@@ -2452,7 +2452,7 @@ export default function App() {
         }}>
           <div style={{ maxWidth: 680, margin: "0 auto", padding: "0 16px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0 0" }}>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.5px" }}>
+              <div style={{ fontFamily: "'Outfit', sans-serif", fontSize: 22, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em" }}>
                 Menu<span style={{ color: "var(--accent)" }}>.</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -2511,7 +2511,7 @@ export default function App() {
             display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
           }}>
             <div style={{ background: "var(--bg2)", borderRadius: "var(--radius)", padding: 24, width: "100%", maxWidth: 400, boxShadow: "var(--shadow)" }}>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>
+              <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>
                 "{pendingRecipe.title}" added!
               </div>
               <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 18 }}>Add it to this week's menu?</div>
@@ -2570,7 +2570,7 @@ export default function App() {
             }} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
                 <div>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 17, fontWeight: 600 }}>Pick a recipe</div>
+                  <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 17, fontWeight: 600 }}>Pick a recipe</div>
                   <div style={{ fontSize: 12, color: "var(--accent)", marginTop: 2 }}>{pickerDay}</div>
                 </div>
                 <button style={{ background: "none", fontSize: 18, color: "var(--text3)", padding: 4 }} onClick={() => { setPickerDay(null); setPendingMult(1); setPickerSearch(""); }}>✕</button>
@@ -2629,7 +2629,7 @@ export default function App() {
                               cursor: "pointer", transition: "border-color 0.15s",
                               opacity: outOfStock ? 0.55 : 1,
                             }} onClick={() => { assignDay(pickerDay, r.id, pendingMult); setPickerSearch(""); }}>
-                              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                              <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
                                 {r.isFreezer && "❄ "}{r.title}
                               </div>
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -2662,7 +2662,7 @@ export default function App() {
           {tab === "menu" && (
             <div className="fade-up">
               <div style={{ marginBottom: 20 }}>
-                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>This Week</div>
+                <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>This Week</div>
                 <div style={{ fontSize: 13, color: "var(--text2)" }}>
                   {DAYS.filter((d) => (week[d] || []).length > 0).length} of 7 nights planned
                 </div>
@@ -2699,7 +2699,7 @@ export default function App() {
           {tab === "library" && (
             <div className="fade-up">
               <div style={{ marginBottom: 20 }}>
-                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Library</div>
+                <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Library</div>
                 <div style={{ fontSize: 13, color: "var(--text2)" }}>{library.length} recipe{library.length !== 1 ? "s" : ""} saved</div>
               </div>
 
@@ -2754,7 +2754,7 @@ export default function App() {
                               {out ? "out of stock" : qty === 1 ? "portion" : "portions"}
                             </div>
                           </div>
-                          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: "var(--text)", minHeight: 34 }}>
+                          <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: "var(--text)", minHeight: 34 }}>
                             ❄ {r.title}
                           </div>
                           <div style={{ display: "flex", gap: 6 }}>
@@ -2827,7 +2827,7 @@ export default function App() {
               {library.length === 0 && storageReady && (
                 <div style={{ textAlign: "center", padding: "60px 20px" }}>
                   <div style={{ fontSize: 48, marginBottom: 16 }}>📚</div>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, marginBottom: 8 }}>Your library is empty</div>
+                  <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 20, marginBottom: 8 }}>Your library is empty</div>
                   <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, maxWidth: 280, margin: "0 auto 20px" }}>
                     Import a recipe from Instagram, TikTok or YouTube — or create your own.
                   </div>
@@ -2849,7 +2849,7 @@ export default function App() {
           {tab === "dev" && (
             <div className="fade-up">
               <div style={{ marginBottom: 20 }}>
-                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Dev</div>
+                <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Dev</div>
                 <div style={{ fontSize: 13, color: "var(--text2)" }}>
                   {devLibrary.length} draft{devLibrary.length !== 1 ? "s" : ""} · custom recipes you're still working on
                 </div>
@@ -2868,7 +2868,7 @@ export default function App() {
               {devLibrary.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 20px" }}>
                   <div style={{ fontSize: 48, marginBottom: 16 }}>🧪</div>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, marginBottom: 8 }}>
+                  <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 20, marginBottom: 8 }}>
                     {library.some((r) => r.status === "dev") ? `No drafts match "${devSearch}"` : "No drafts yet"}
                   </div>
                   <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, maxWidth: 320, margin: "0 auto 20px" }}>
@@ -2913,7 +2913,7 @@ export default function App() {
             <div className="fade-up">
               <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 20 }}>
                 <div>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Shopping List</div>
+                  <div style={{ fontFamily: "'Outfit', sans-serif", letterSpacing: "-0.02em", fontSize: 26, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Shopping List</div>
                   <div style={{ fontSize: 13, color: "var(--text2)" }}>
                     {DAYS.filter((d) => (week[d] || []).length > 0).length} recipes · {shoppingList.length} items
                   </div>
