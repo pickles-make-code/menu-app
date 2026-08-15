@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Menu App — Design Mockups</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100%; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: 'DM Sans', system-ui, sans-serif;
+      padding: 24px 12px 60px;
+    }
+    .page-head { max-width: 1200px; margin: 0 auto 24px; padding: 0 12px; }
+    .page-head h1 { font-family: 'Playfair Display', serif; font-size: 28px; margin-bottom: 6px; }
+    .page-head p { color: #aaa; font-size: 14px; }
+    .grid {
+      max-width: 1200px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .col-head {
+      text-align: center; padding: 12px 8px; color: #ccc;
+      font-family: 'DM Sans', sans-serif;
+    }
+    .col-head strong { display: block; font-size: 15px; color: #fff; margin-bottom: 2px; }
+    .col-head span { font-size: 12px; color: #888; }
+    .frame {
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid #333;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+
+    /* ─── shared mock structure ─── */
+    .m { padding: 20px 16px 28px; min-height: 720px; }
+    .m .brand { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; opacity: 0.5; margin-bottom: 6px; }
+    .m h2.title { font-size: 26px; margin-bottom: 4px; line-height: 1.15; }
+    .m .subtitle { font-size: 13px; margin-bottom: 20px; }
+    .m .search {
+      width: 100%; padding: 10px 12px; margin-bottom: 12px;
+      font-family: inherit; font-size: 13px; outline: none;
+    }
+    .m .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }
+    .m .chip {
+      padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .m .card {
+      padding: 14px; margin-bottom: 10px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .m .card h3 { font-size: 16px; font-weight: 600; }
+    .m .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .m .tag {
+      font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .m .meta { font-size: 11px; opacity: 0.7; display: flex; gap: 10px; }
+    .m .tabbar {
+      display: flex; justify-content: space-around; padding: 10px 0;
+      margin-top: 16px; font-size: 11px;
+    }
+    .m .tabbar span { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    .m .tabbar .ico { font-size: 18px; }
+    .m .day-head { display: flex; align-items: baseline; justify-content: space-between; margin: 20px 0 10px; }
+    .m .day-head .d { font-size: 18px; font-weight: 700; }
+    .m .day-head .n { font-size: 11px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.1em; }
+    .m .courseh { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; opacity: 0.6; margin: 8px 0 6px; }
+
+    /* ─────────── 1. BRIGHT COOKBOOK ─────────── */
+    .cookbook {
+      background: #f8f5ef;
+      color: #1a1a1a;
+      font-family: 'DM Sans', sans-serif;
+    }
+    .cookbook .brand { color: #6b8e5a; }
+    .cookbook h2.title { font-family: 'Playfair Display', serif; font-weight: 700; color: #1a1a1a; }
+    .cookbook .subtitle { color: #6d6a63; }
+    .cookbook .search {
+      background: #fff; border: 1px solid #e8e2d4; color: #1a1a1a;
+      border-radius: 8px;
+    }
+    .cookbook .chip { background: #fff; border: 1px solid #e8e2d4; color: #6d6a63; }
+    .cookbook .chip.active { background: #6b8e5a; color: #fff; border-color: #6b8e5a; }
+    .cookbook .card {
+      background: #fff; border: 1px solid #e8e2d4; border-radius: 14px;
+    }
+    .cookbook .card h3 { font-family: 'Playfair Display', serif; color: #1a1a1a; }
+    .cookbook .tag { background: #f0ede4; color: #6d6a63; }
+    .cookbook .tag.accent { background: #6b8e5a; color: #fff; }
+    .cookbook .meta { color: #928d84; }
+    .cookbook .tabbar { border-top: 1px solid #e8e2d4; color: #928d84; }
+    .cookbook .tabbar .active { color: #6b8e5a; font-weight: 600; }
+    .cookbook .day-head .d { font-family: 'Playfair Display', serif; color: #1a1a1a; }
+    .cookbook .day-head .n { color: #6b8e5a; }
+    .cookbook .courseh { color: #6b8e5a; }
+
+    /* ─────────── 2. DEEP GOURMET ─────────── */
+    .gourmet {
+      background: #0f1210;
+      color: #f2ede0;
+      font-family: 'DM Sans', sans-serif;
+    }
+    .gourmet .brand { color: #c9a961; }
+    .gourmet h2.title { font-family: 'Playfair Display', serif; font-weight: 600; color: #f2ede0; }
+    .gourmet .subtitle { color: #a89f8a; }
+    .gourmet .search {
+      background: #1a1f1c; border: 1px solid rgba(255,255,255,0.1); color: #f2ede0;
+      border-radius: 10px;
+    }
+    .gourmet .chip { background: #1a1f1c; border: 1px solid rgba(255,255,255,0.08); color: #a89f8a; }
+    .gourmet .chip.active { background: #c9a961; color: #0f1210; border-color: #c9a961; }
+    .gourmet .card {
+      background: #1a1f1c; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px;
+    }
+    .gourmet .card h3 { font-family: 'Playfair Display', serif; color: #f2ede0; }
+    .gourmet .tag { background: rgba(201,169,97,0.14); color: #c9a961; }
+    .gourmet .tag.accent { background: #4a6b52; color: #f2ede0; }
+    .gourmet .meta { color: #a89f8a; }
+    .gourmet .tabbar { border-top: 1px solid rgba(255,255,255,0.06); color: #a89f8a; }
+    .gourmet .tabbar .active { color: #c9a961; font-weight: 600; }
+    .gourmet .day-head .d { font-family: 'Playfair Display', serif; color: #f2ede0; }
+    .gourmet .day-head .n { color: #c9a961; }
+    .gourmet .courseh { color: #c9a961; }
+
+    /* ─────────── 3. MODERN MINIMAL ─────────── */
+    .minimal {
+      background: #ffffff;
+      color: #0a0a0a;
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+    .minimal .brand { color: #e85d4a; }
+    .minimal h2.title { font-family: 'Inter', sans-serif; font-weight: 700; letter-spacing: -0.02em; color: #0a0a0a; }
+    .minimal .subtitle { color: #6b6b6b; }
+    .minimal .search {
+      background: #fafaf9; border: 1px solid #ececec; color: #0a0a0a;
+      border-radius: 6px;
+    }
+    .minimal .chip { background: #fafaf9; border: 1px solid #ececec; color: #4b4b4b; border-radius: 6px; }
+    .minimal .chip.active { background: #e85d4a; color: #fff; border-color: #e85d4a; }
+    .minimal .card {
+      background: #fafaf9; border: 1px solid #ececec; border-radius: 8px;
+    }
+    .minimal .card h3 { font-family: 'Inter', sans-serif; font-weight: 600; letter-spacing: -0.01em; }
+    .minimal .tag { background: transparent; color: #6b6b6b; padding: 0; font-size: 12px; text-transform: none; letter-spacing: 0; }
+    .minimal .tag.accent { color: #e85d4a; }
+    .minimal .tag-sep { color: #cfcfcf; }
+    .minimal .meta { color: #8a8a8a; }
+    .minimal .tabbar { border-top: 1px solid #ececec; color: #8a8a8a; }
+    .minimal .tabbar .active { color: #0a0a0a; font-weight: 600; }
+    .minimal .day-head .d { font-family: 'Inter', sans-serif; font-weight: 700; letter-spacing: -0.01em; color: #0a0a0a; }
+    .minimal .day-head .n { color: #6b6b6b; }
+    .minimal .courseh { color: #8a8a8a; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1>Menu App — Design Mockups</h1>
+    <p>Three directions. Each shows a Library view (recipe list + filter chips) and a Menu view (a day with grouped recipes).</p>
+  </div>
+
+  <div class="grid">
+    <!-- ═════════════ 1. BRIGHT COOKBOOK ═════════════ -->
+    <div>
+      <div class="col-head"><strong>1. Bright Cookbook</strong><span>light · sage green · serif headings · NYT Cooking vibe</span></div>
+      <div class="frame">
+        <div class="m cookbook">
+          <div class="brand">Menu App</div>
+          <h2 class="title">Library</h2>
+          <div class="subtitle">Your recipe collection</div>
+          <input class="search" placeholder="Search title, cuisine or ingredient…" />
+          <div class="chips">
+            <span class="chip active">All</span>
+            <span class="chip">⭐ Favourites</span>
+            <span class="chip">🥗 Sides</span>
+            <span class="chip">Italian</span>
+            <span class="chip">Asian</span>
+            <span class="chip">Mediterranean</span>
+          </div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span><span class="tag">Side</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>40 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Thai Green Curry</h3>
+            <div class="tags"><span class="tag accent">Thai</span><span class="tag">Main</span><span class="tag">Medium</span></div>
+            <div class="meta"><span>45 min</span><span>Serves 4</span></div>
+          </div>
+
+          <div class="day-head"><span class="d">Wednesday</span><span class="n">Menu</span></div>
+          <div class="courseh">Main</div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag">Easy</span></div>
+          </div>
+          <div class="courseh">Side</div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span></div>
+          </div>
+
+          <div class="tabbar">
+            <span class="active"><span class="ico">📅</span>Menu</span>
+            <span><span class="ico">📚</span>Library</span>
+            <span><span class="ico">🛒</span>List</span>
+            <span><span class="ico">＋</span>Import</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════ 2. DEEP GOURMET ═════════════ -->
+    <div>
+      <div class="col-head"><strong>2. Deep Gourmet</strong><span>dark · brass gold + forest green · serif headings · restaurant vibe</span></div>
+      <div class="frame">
+        <div class="m gourmet">
+          <div class="brand">Menu App</div>
+          <h2 class="title">Library</h2>
+          <div class="subtitle">Your recipe collection</div>
+          <input class="search" placeholder="Search title, cuisine or ingredient…" />
+          <div class="chips">
+            <span class="chip active">All</span>
+            <span class="chip">⭐ Favourites</span>
+            <span class="chip">🥗 Sides</span>
+            <span class="chip">Italian</span>
+            <span class="chip">Asian</span>
+            <span class="chip">Mediterranean</span>
+          </div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span><span class="tag">Side</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>40 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Thai Green Curry</h3>
+            <div class="tags"><span class="tag accent">Thai</span><span class="tag">Main</span><span class="tag">Medium</span></div>
+            <div class="meta"><span>45 min</span><span>Serves 4</span></div>
+          </div>
+
+          <div class="day-head"><span class="d">Wednesday</span><span class="n">Menu</span></div>
+          <div class="courseh">Main</div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag">Easy</span></div>
+          </div>
+          <div class="courseh">Side</div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span></div>
+          </div>
+
+          <div class="tabbar">
+            <span class="active"><span class="ico">📅</span>Menu</span>
+            <span><span class="ico">📚</span>Library</span>
+            <span><span class="ico">🛒</span>List</span>
+            <span><span class="ico">＋</span>Import</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════ 3. MODERN MINIMAL ═════════════ -->
+    <div>
+      <div class="col-head"><strong>3. Modern Minimal</strong><span>light · coral accent · Inter · Linear/Notion vibe</span></div>
+      <div class="frame">
+        <div class="m minimal">
+          <div class="brand">MENU APP</div>
+          <h2 class="title">Library</h2>
+          <div class="subtitle">Your recipe collection</div>
+          <input class="search" placeholder="Search…" />
+          <div class="chips">
+            <span class="chip active">All</span>
+            <span class="chip">★ Favourites</span>
+            <span class="chip">🥗 Sides</span>
+            <span class="chip">Italian</span>
+            <span class="chip">Asian</span>
+            <span class="chip">Mediterranean</span>
+          </div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag-sep">·</span><span class="tag">Main</span><span class="tag-sep">·</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span><span class="tag-sep">·</span><span class="tag">Side</span><span class="tag-sep">·</span><span class="tag">Easy</span></div>
+            <div class="meta"><span>40 min</span><span>Serves 4</span></div>
+          </div>
+          <div class="card">
+            <h3>Thai Green Curry</h3>
+            <div class="tags"><span class="tag accent">Thai</span><span class="tag-sep">·</span><span class="tag">Main</span><span class="tag-sep">·</span><span class="tag">Medium</span></div>
+            <div class="meta"><span>45 min</span><span>Serves 4</span></div>
+          </div>
+
+          <div class="day-head"><span class="d">Wednesday</span><span class="n">MENU</span></div>
+          <div class="courseh">MAIN</div>
+          <div class="card">
+            <h3>Salmon Pesto Rigatoni</h3>
+            <div class="tags"><span class="tag accent">Italian</span><span class="tag-sep">·</span><span class="tag">Easy</span></div>
+          </div>
+          <div class="courseh">SIDE</div>
+          <div class="card">
+            <h3>Roast Cauliflower with Tahini</h3>
+            <div class="tags"><span class="tag accent">Mediterranean</span></div>
+          </div>
+
+          <div class="tabbar">
+            <span class="active"><span class="ico">📅</span>Menu</span>
+            <span><span class="ico">📚</span>Library</span>
+            <span><span class="ico">🛒</span>List</span>
+            <span><span class="ico">＋</span>Import</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
