@@ -9,11 +9,9 @@ React + Vite meal planner. Single-page app — one component file, serverless AP
 ## Deploy
 ```bash
 cd "C:/Projects/menu-app"
-npm run build          # verify build first
-vercel --yes           # preview deploy
-vercel --prod --yes    # production deploy
+vercel --prod          # production deploy
 ```
-Not a git repo — no git commands needed.
+Linked to GitHub at `github.com/pickles-make-code/menu-app` (branch: main). Push first, then deploy.
 
 ## Stack
 | Layer | Detail |
@@ -21,7 +19,7 @@ Not a git repo — no git commands needed.
 | Frontend | React 18 + Vite, `src/App.jsx` (~3300 lines, single file) |
 | API | Vercel serverless, `api/extract.js` (Claude recipe extraction) + `api/store.js` (Redis R/W) |
 | Storage | Upstash Redis via `/api/store`, keyed by household code |
-| AI | Anthropic Claude — link extraction, photo OCR, custom recipe structuring |
+| AI | Anthropic Claude — Haiku for URL/text extraction, Sonnet for custom recipe structuring + photo OCR |
 
 ## Key files
 - `src/App.jsx` — entire frontend: components, state, API calls, styles
@@ -64,7 +62,12 @@ Counts checked items across grocery + cleaning + pharmacy. The single "Clear che
 `showBanner(msg)` sets a green toast for 3 seconds. It's defined in the App component body (not a hook).
 
 ## Import modes
-Link → URL scrape + Claude | Custom → Claude structuring | Photo → base64 + Claude vision | Freezer → local only
+Link → URL scrape + Claude (Haiku) | Custom → Claude structuring (Sonnet) | Photo → base64 + Claude vision (Sonnet) | Freezer → local only
+
+### Model routing in api/extract.js
+- URL extraction: Haiku, max_tokens 800
+- Custom recipe: Sonnet, max_tokens 800 — must stay Sonnet; Haiku misclassifies freetext ingredients (all fall through to `dry` default)
+- Photo OCR: Sonnet, max_tokens 1500
 
 The Book/EPUB import mode was removed — do not re-add it. It made multiple Claude API calls per recipe and was too expensive.
 
