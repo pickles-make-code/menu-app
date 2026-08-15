@@ -2402,6 +2402,7 @@ export default function App() {
     if (!recipeMatchesQuery(r, libSearch)) return false;
     if (libSection === "favourites") return r.favourite;
     if (libSection === "freezer") return r.isFreezer;
+    if (libSection === "sides") return r.course === "Side";
     if (libSection === "all") return true;
     return r.cuisine === libSection;
   });
@@ -2775,8 +2776,10 @@ export default function App() {
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
                   {(() => {
                     const hasFreezer = library.some((r) => r.isFreezer);
+                    const hasSides = publishedLibrary.some((r) => r.course === "Side");
                     const chips = ["all", "favourites"];
                     if (hasFreezer) chips.push("freezer");
+                    if (hasSides) chips.push("sides");
                     chips.push(...usedCuisines);
                     return chips.map((s) => (
                       <button key={s} style={{
@@ -2784,10 +2787,10 @@ export default function App() {
                         background: libSection === s ? "var(--accent)" : "var(--bg3)",
                         color: libSection === s ? "#fff" : "var(--text2)",
                         border: `1.5px solid ${libSection === s ? "var(--accent)" : "var(--border)"}`,
-                        textTransform: ["all", "favourites", "freezer"].includes(s) ? "capitalize" : "none",
+                        textTransform: ["all", "favourites", "freezer", "sides"].includes(s) ? "capitalize" : "none",
                         transition: "all 0.15s",
                       }} onClick={() => setLibSection(s)}>
-                        {s === "favourites" ? "⭐ Favourites" : s === "freezer" ? "❄ Freezer" : s === "all" ? "All" : s}
+                        {s === "favourites" ? "⭐ Favourites" : s === "freezer" ? "❄ Freezer" : s === "sides" ? "🥗 Sides" : s === "all" ? "All" : s}
                       </button>
                     ));
                   })()}
