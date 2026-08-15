@@ -1979,6 +1979,12 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("menu_active_tab", tab); } catch {}
   }, [tab]);
+  const [freezerCollapsed, setFreezerCollapsed] = useState(() => {
+    try { return localStorage.getItem("menu_freezer_collapsed") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("menu_freezer_collapsed", freezerCollapsed ? "1" : "0"); } catch {}
+  }, [freezerCollapsed]);
   const [library, setLibrary] = useState([]);
   const [week, setWeek] = useState(emptyWeek); // {day: [{id, mult, cooked}, ...]}
   const [shoppingList, setShoppingList] = useState([]); // [{item,category,combinedAmount,entries,checked}]
@@ -2706,16 +2712,29 @@ export default function App() {
               {/* Freezer inventory — quick at-a-glance with +/- adjusters per meal */}
               {!libSearch && freezerInventory.length > 0 && (
                 <div style={{ marginBottom: 24 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px" }}>
-                      ❄ Freezer Inventory
-                    </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: freezerCollapsed ? 0 : 10 }}>
                     <button
-                      onClick={() => setLibSection("freezer")}
-                      style={{ background: "none", color: "var(--text3)", fontSize: 11, padding: "2px 4px" }}
-                      title="Filter library to freezer meals"
-                    >View all →</button>
+                      onClick={() => setFreezerCollapsed((c) => !c)}
+                      style={{
+                        background: "none", padding: "4px 0", display: "flex", alignItems: "center", gap: 6,
+                        fontSize: 11, fontWeight: 600, color: "var(--text3)",
+                        textTransform: "uppercase", letterSpacing: "0.8px",
+                      }}
+                      title={freezerCollapsed ? "Expand freezer inventory" : "Collapse freezer inventory"}
+                    >
+                      <span style={{ display: "inline-block", transform: freezerCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.15s", fontSize: 9 }}>▼</span>
+                      ❄ Freezer Inventory
+                      {freezerCollapsed && <span style={{ opacity: 0.6, fontWeight: 500 }}>({freezerInventory.length})</span>}
+                    </button>
+                    {!freezerCollapsed && (
+                      <button
+                        onClick={() => setLibSection("freezer")}
+                        style={{ background: "none", color: "var(--text3)", fontSize: 11, padding: "2px 4px" }}
+                        title="Filter library to freezer meals"
+                      >View all →</button>
+                    )}
                   </div>
+                  {!freezerCollapsed && (
                   <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
                     {freezerInventory.map((r) => {
                       const qty = r.quantity || 0;
@@ -2755,6 +2774,7 @@ export default function App() {
                       );
                     })}
                   </div>
+                  )}
                 </div>
               )}
 

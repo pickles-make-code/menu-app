@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Menu App — Font Options</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://fonts.cdnfonts.com/css/geist" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1c1a18;
+      color: #f0ebe3;
+      font-family: 'Inter', system-ui, sans-serif;
+      padding: 24px 12px 60px;
+    }
+    .page-head { max-width: 900px; margin: 0 auto 24px; padding: 0 4px; }
+    .page-head h1 { font-size: 24px; margin-bottom: 6px; font-weight: 700; }
+    .page-head p { color: #a89f94; font-size: 13px; }
+
+    .row {
+      max-width: 900px; margin: 0 auto 16px;
+      background: #242220;
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 14px;
+      padding: 22px 22px 20px;
+    }
+    .row .label {
+      display: flex; align-items: baseline; justify-content: space-between;
+      margin-bottom: 16px;
+      font-family: 'Inter', sans-serif;
+    }
+    .row .label .name { font-size: 12px; font-weight: 600; color: #6b8e5a; letter-spacing: 0.06em; text-transform: uppercase; }
+    .row .label .desc { font-size: 11px; color: #6b6560; }
+
+    /* Sample block — uses the row's font */
+    .sample .brand {
+      font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+      margin-bottom: 4px;
+    }
+    .sample .brand .dot { color: #6b8e5a; }
+    .sample .page-title {
+      font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+      margin: 12px 0 4px;
+    }
+    .sample .subtitle {
+      font-size: 13px; color: #a89f94; margin-bottom: 16px;
+    }
+    .sample .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+    .sample .chip {
+      padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      background: #2c2a27; border: 1.5px solid rgba(255,255,255,0.07); color: #a89f94;
+    }
+    .sample .chip.active { background: #6b8e5a; color: #fff; border-color: #6b8e5a; }
+    .sample .card {
+      background: #2c2a27; border: 1.5px solid rgba(255,255,255,0.07);
+      border-radius: 12px; padding: 14px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .sample .card h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+    .sample .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .sample .tag {
+      font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      background: rgba(107,142,90,0.14); color: #6b8e5a;
+    }
+    .sample .meta { font-size: 11px; color: #a89f94; display: flex; gap: 10px; }
+    .sample .ingredients {
+      margin-top: 4px; font-size: 13px; color: #a89f94; line-height: 1.55;
+    }
+
+    /* Per-font families */
+    .f-inter    .sample { font-family: 'Inter', system-ui, sans-serif; }
+    .f-geist    .sample { font-family: 'Geist', system-ui, sans-serif; }
+    .f-manrope  .sample { font-family: 'Manrope', system-ui, sans-serif; }
+    .f-grotesk  .sample { font-family: 'Space Grotesk', system-ui, sans-serif; }
+    .f-outfit   .sample { font-family: 'Outfit', system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1>Font Options</h1>
+    <p>Same content, five fonts. Dark theme + sage accent for realistic context. Pick the one that reads best to you.</p>
+  </div>
+
+  <!-- 1. INTER -->
+  <div class="row f-inter">
+    <div class="label"><span class="name">1 · Inter</span><span class="desc">SaaS standard — Vercel, GitHub, Notion. Neutral, extremely readable.</span></div>
+    <div class="sample">
+      <div class="brand">Menu<span class="dot">.</span></div>
+      <div class="page-title">Library</div>
+      <div class="subtitle">Your recipe collection · 47 recipes</div>
+      <div class="chips">
+        <span class="chip active">All</span>
+        <span class="chip">⭐ Favourites</span>
+        <span class="chip">🥗 Sides</span>
+        <span class="chip">Italian</span>
+      </div>
+      <div class="card">
+        <h3>Salmon Pesto Rigatoni</h3>
+        <div class="tags"><span class="tag">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+        <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+        <div class="ingredients">Salmon fillets, rigatoni, basil pesto, cherry tomatoes, garlic, parmesan.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. GEIST -->
+  <div class="row f-geist">
+    <div class="label"><span class="name">2 · Geist</span><span class="desc">Vercel's own — similar to Inter but slightly more distinctive and geometric.</span></div>
+    <div class="sample">
+      <div class="brand">Menu<span class="dot">.</span></div>
+      <div class="page-title">Library</div>
+      <div class="subtitle">Your recipe collection · 47 recipes</div>
+      <div class="chips">
+        <span class="chip active">All</span>
+        <span class="chip">⭐ Favourites</span>
+        <span class="chip">🥗 Sides</span>
+        <span class="chip">Italian</span>
+      </div>
+      <div class="card">
+        <h3>Salmon Pesto Rigatoni</h3>
+        <div class="tags"><span class="tag">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+        <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+        <div class="ingredients">Salmon fillets, rigatoni, basil pesto, cherry tomatoes, garlic, parmesan.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. MANROPE -->
+  <div class="row f-manrope">
+    <div class="label"><span class="name">3 · Manrope</span><span class="desc">Clean but warmer and rounder — feels friendlier, less corporate.</span></div>
+    <div class="sample">
+      <div class="brand">Menu<span class="dot">.</span></div>
+      <div class="page-title">Library</div>
+      <div class="subtitle">Your recipe collection · 47 recipes</div>
+      <div class="chips">
+        <span class="chip active">All</span>
+        <span class="chip">⭐ Favourites</span>
+        <span class="chip">🥗 Sides</span>
+        <span class="chip">Italian</span>
+      </div>
+      <div class="card">
+        <h3>Salmon Pesto Rigatoni</h3>
+        <div class="tags"><span class="tag">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+        <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+        <div class="ingredients">Salmon fillets, rigatoni, basil pesto, cherry tomatoes, garlic, parmesan.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. SPACE GROTESK -->
+  <div class="row f-grotesk">
+    <div class="label"><span class="name">4 · Space Grotesk</span><span class="desc">Clean with character — sharper terminals, a little more editorial personality.</span></div>
+    <div class="sample">
+      <div class="brand">Menu<span class="dot">.</span></div>
+      <div class="page-title">Library</div>
+      <div class="subtitle">Your recipe collection · 47 recipes</div>
+      <div class="chips">
+        <span class="chip active">All</span>
+        <span class="chip">⭐ Favourites</span>
+        <span class="chip">🥗 Sides</span>
+        <span class="chip">Italian</span>
+      </div>
+      <div class="card">
+        <h3>Salmon Pesto Rigatoni</h3>
+        <div class="tags"><span class="tag">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+        <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+        <div class="ingredients">Salmon fillets, rigatoni, basil pesto, cherry tomatoes, garlic, parmesan.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. OUTFIT -->
+  <div class="row f-outfit">
+    <div class="label"><span class="name">5 · Outfit</span><span class="desc">Geometric, minimal, tech-forward — feels modern and airy.</span></div>
+    <div class="sample">
+      <div class="brand">Menu<span class="dot">.</span></div>
+      <div class="page-title">Library</div>
+      <div class="subtitle">Your recipe collection · 47 recipes</div>
+      <div class="chips">
+        <span class="chip active">All</span>
+        <span class="chip">⭐ Favourites</span>
+        <span class="chip">🥗 Sides</span>
+        <span class="chip">Italian</span>
+      </div>
+      <div class="card">
+        <h3>Salmon Pesto Rigatoni</h3>
+        <div class="tags"><span class="tag">Italian</span><span class="tag">Main</span><span class="tag">Easy</span></div>
+        <div class="meta"><span>25 min</span><span>Serves 4</span></div>
+        <div class="ingredients">Salmon fillets, rigatoni, basil pesto, cherry tomatoes, garlic, parmesan.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
