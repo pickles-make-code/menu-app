@@ -1470,7 +1470,7 @@ function ImportPage({ library, onImported, showBanner }) {
       setCustomName(""); setCustomIngredients(""); setCustomMethod(""); setFreezerQty(1); setStage("");
       showBanner(`"${recipe.title}" added to freezer (×${recipe.quantity})`);
     } catch (e) {
-      setError("Could not save freezer meal. Please check your inputs.");
+      setError(e?.message || "Could not save freezer meal.");
     }
     setLoading(false); setStage("");
   }
