@@ -90,3 +90,8 @@ The Book/EPUB import mode was removed — do not re-add it. It made multiple Cla
 `fruit_veg` | `meat` | `dairy` | `deli` | `dry` | `freezer`
 
 Australian English throughout (zucchini, capsicum, prawns, mince, etc.).
+
+## Skills to prefer
+- **`code-simplification`** — `src/App.jsx` is already ~3300 lines. Changes should shrink or hold, not grow it.
+- **`debugging-and-error-recovery`** — stale-closure and Redis-sync bugs in shopping-list rebuild have bitten before. Root-cause them, don't add defensive wrappers.
+- Skip heavier process (TDD, spec-driven, doubt-driven) — personal single-user SPA, ceremony isn't worth it.
