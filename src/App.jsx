@@ -3137,6 +3137,26 @@ export default function App() {
                 );
               })}
 
+              {/* Fixed extra sections — always visible, persist independently of weekly menu */}
+              <ExtraSection
+                title="Cleaning"
+                icon="🧴"
+                items={cleaning}
+                onAdd={(text) => addExtraItem("cleaning", text)}
+                onToggle={(id) => toggleExtraItem("cleaning", id)}
+                onRemove={(id) => removeExtraItem("cleaning", id)}
+                onEdit={(id, text) => editExtraItem("cleaning", id, text)}
+              />
+              <ExtraSection
+                title="Pharmacy"
+                icon="💊"
+                items={pharmacy}
+                onAdd={(text) => addExtraItem("pharmacy", text)}
+                onToggle={(id) => toggleExtraItem("pharmacy", id)}
+                onRemove={(id) => removeExtraItem("pharmacy", id)}
+                onEdit={(id, text) => editExtraItem("pharmacy", id, text)}
+              />
+
               {/* Add custom store category */}
               <div style={{ marginBottom: 24 }}>
                 {addingCustomCat ? (
@@ -3159,26 +3179,6 @@ export default function App() {
                   >+ Add store category</button>
                 )}
               </div>
-
-              {/* Fixed extra sections — always visible, persist independently of weekly menu */}
-              <ExtraSection
-                title="Cleaning"
-                icon="🧴"
-                items={cleaning}
-                onAdd={(text) => addExtraItem("cleaning", text)}
-                onToggle={(id) => toggleExtraItem("cleaning", id)}
-                onRemove={(id) => removeExtraItem("cleaning", id)}
-                onEdit={(id, text) => editExtraItem("cleaning", id, text)}
-              />
-              <ExtraSection
-                title="Pharmacy"
-                icon="💊"
-                items={pharmacy}
-                onAdd={(text) => addExtraItem("pharmacy", text)}
-                onToggle={(id) => toggleExtraItem("pharmacy", id)}
-                onRemove={(id) => removeExtraItem("pharmacy", id)}
-                onEdit={(id, text) => editExtraItem("pharmacy", id, text)}
-              />
             </div>
           )}
 
