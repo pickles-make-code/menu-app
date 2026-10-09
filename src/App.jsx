@@ -7,6 +7,7 @@ const SK = {
   list: "menu_list_v2",
   cleaning: "menu_cleaning_v1",
   pharmacy: "menu_pharmacy_v1",
+  customCats: "menu_custom_cats_v1",
 };
 
 // ─── Constants ────────────────────────────────────────────────
@@ -828,26 +829,27 @@ function AddItemInput({ placeholder, onAdd }) {
     setVal("");
   }
   return (
-    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+    <form onSubmit={(e) => { e.preventDefault(); submit(); }} style={{ display: "flex", gap: 6, marginTop: 8 }}>
       <input
         style={{ ...inputStyle, flex: 1, padding: "7px 10px", fontSize: 13 }}
         placeholder={placeholder}
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <button
+        type="submit"
         style={{ ...btnStyle, background: val.trim() ? "var(--accent)" : "var(--bg4)", color: val.trim() ? "#fff" : "var(--text3)", padding: "7px 14px", fontSize: 12 }}
-        onClick={submit}
         disabled={!val.trim()}
       >+ Add</button>
-    </div>
+    </form>
   );
 }
 
 // Reusable section for the bottom of the List tab — Cleaning or Pharmacy
-function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
+function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove, onEdit }) {
   const [input, setInput] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editingVal, setEditingVal] = useState("");
   const checkedCount = items.filter((i) => i.checked).length;
 
   function submit() {
@@ -855,6 +857,18 @@ function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
     if (!v) return;
     onAdd(v);
     setInput("");
+  }
+
+  function startEdit(item) {
+    setEditingId(item.id);
+    setEditingVal(item.text);
+  }
+
+  function commitEdit(id) {
+    const v = editingVal.trim();
+    if (v && onEdit) onEdit(id, v);
+    setEditingId(null);
+    setEditingVal("");
   }
 
   return (
@@ -892,16 +906,29 @@ function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
               >
                 {item.checked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
               </div>
-              <span
-                style={{
-                  flex: 1, fontSize: 14,
-                  color: item.checked ? "var(--text3)" : "var(--text)",
-                  textDecoration: item.checked ? "line-through" : "none",
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                }}
-                onClick={() => onToggle(item.id)}
-              >{item.text}</span>
+              {editingId === item.id ? (
+                <form onSubmit={(e) => { e.preventDefault(); commitEdit(item.id); }} style={{ flex: 1 }}>
+                  <input
+                    autoFocus
+                    style={{ ...inputStyle, width: "100%", padding: "4px 8px", fontSize: 14 }}
+                    value={editingVal}
+                    onChange={(e) => setEditingVal(e.target.value)}
+                    onBlur={() => commitEdit(item.id)}
+                  />
+                </form>
+              ) : (
+                <span
+                  style={{
+                    flex: 1, fontSize: 14,
+                    color: item.checked ? "var(--text3)" : "var(--text)",
+                    textDecoration: item.checked ? "line-through" : "none",
+                    cursor: "pointer",
+                    transition: "all 0.15s",
+                  }}
+                  onClick={() => onToggle(item.id)}
+                  onDoubleClick={(e) => { e.stopPropagation(); startEdit(item); }}
+                >{item.text}</span>
+              )}
               <button
                 style={{ background: "none", fontSize: 14, color: "var(--text3)", padding: 2 }}
                 onClick={() => onRemove(item.id)}
@@ -913,20 +940,19 @@ function ExtraSection({ title, icon, items, onAdd, onToggle, onRemove }) {
       )}
 
       {/* Add input */}
-      <div style={{ display: "flex", gap: 6 }}>
+      <form onSubmit={(e) => { e.preventDefault(); submit(); }} style={{ display: "flex", gap: 6 }}>
         <input
           style={{ ...inputStyle, flex: 1 }}
           placeholder={`Add a ${title.toLowerCase()} item...`}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
         />
         <button
+          type="submit"
           style={{ ...btnStyle, background: input.trim() ? "var(--accent)" : "var(--bg4)", color: input.trim() ? "#fff" : "var(--text3)", padding: "9px 16px" }}
-          onClick={submit}
           disabled={!input.trim()}
         >Add</button>
-      </div>
+      </form>
     </div>
   );
 }
@@ -2023,6 +2049,15 @@ export default function App() {
   const [cleaning, setCleaning] = useState([]);
   const [pharmacy, setPharmacy] = useState([]);
 
+  // Custom store categories (e.g. "Kmart")
+  const [customCats, setCustomCats] = useState([]);
+  const [addingCustomCat, setAddingCustomCat] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+
+  // Grocery item inline editing
+  const [editingGroceryIdx, setEditingGroceryIdx] = useState(null);
+  const [editingGroceryVal, setEditingGroceryVal] = useState("");
+
   // Household sync state
   const [householdCode, setHouseholdCode] = useState(getStoredHouseholdCode);
   const [loadError, setLoadError] = useState("");
@@ -2051,6 +2086,7 @@ export default function App() {
     setShoppingList([]);
     setCleaning([]);
     setPharmacy([]);
+    setCustomCats([]);
     setStorageReady(false);
   }
 
@@ -2067,12 +2103,14 @@ export default function App() {
         const sl = await sget(SK.list);
         const cl = await sget(SK.cleaning);
         const ph = await sget(SK.pharmacy);
+        const cc = await sget(SK.customCats);
         // Normalize recipes to backfill course/status defaults on older library entries
         if (lib) setLibrary(lib.map((r) => normalizeRecipe(r)));
         if (wk && Object.keys(wk).length) setWeek(normalizeWeek(wk));
         if (sl) setShoppingList(sl);
         if (Array.isArray(cl)) setCleaning(cl);
         if (Array.isArray(ph)) setPharmacy(ph);
+        if (Array.isArray(cc)) setCustomCats(cc);
       } catch (e) {
         setLoadError(e.message || "Failed to load household data.");
       }
@@ -2087,6 +2125,7 @@ export default function App() {
   const saveList = useCallback(async (sl, opts) => { await sset(SK.list, sl, opts); }, []);
   const saveCleaning = useCallback(async (cl) => { await sset(SK.cleaning, cl); }, []);
   const savePharmacy = useCallback(async (ph) => { await sset(SK.pharmacy, ph); }, []);
+  const saveCustomCats = useCallback(async (cc) => { await sset(SK.customCats, cc); }, []);
 
   function showBanner(msg) {
     setBanner(msg);
@@ -2361,6 +2400,48 @@ export default function App() {
     setShoppingList(updated);
     // Save immediately — losing a tick because a debounce was mid-flight is the bug being fixed here.
     await saveList(updated, { immediate: true });
+  }
+
+  async function updateListItemText(idx, newText) {
+    const cleaned = cleanText(newText);
+    if (!cleaned) return;
+    const updated = shoppingList.map((item, i) => i === idx ? { ...item, item: cleaned } : item);
+    setShoppingList(updated);
+    await saveList(updated);
+  }
+
+  // ── Extra section editing ──
+  async function editExtraItem(category, id, newText) {
+    const cleaned = cleanText(newText);
+    if (!cleaned) return;
+    if (category === "cleaning") {
+      const updated = cleaning.map((i) => i.id === id ? { ...i, text: cleaned } : i);
+      setCleaning(updated); await saveCleaning(updated);
+    } else {
+      const updated = pharmacy.map((i) => i.id === id ? { ...i, text: cleaned } : i);
+      setPharmacy(updated); await savePharmacy(updated);
+    }
+  }
+
+  // ── Custom categories ──
+  async function addCustomCat(name) {
+    const label = name.trim();
+    if (!label) return;
+    const cat = { id: `custom_${uid()}`, label, icon: "🛒" };
+    const updated = [...customCats, cat];
+    setCustomCats(updated);
+    await saveCustomCats(updated);
+    setNewCatName("");
+    setAddingCustomCat(false);
+  }
+
+  async function deleteCustomCat(id) {
+    const updatedCats = customCats.filter((c) => c.id !== id);
+    setCustomCats(updatedCats);
+    await saveCustomCats(updatedCats);
+    const updatedList = shoppingList.filter((i) => i.category !== id);
+    setShoppingList(updatedList);
+    await saveList(updatedList);
   }
 
   // ── Handle new import ──
@@ -2934,8 +3015,9 @@ export default function App() {
                 )}
               </div>
 
-              {/* Always render all 6 grocery categories, even when empty, so you can add items manually */}
-              {GROCERY_CATS.map((cat) => {
+              {/* Always render all grocery categories (standard + custom) so you can add items manually */}
+              {[...GROCERY_CATS, ...customCats].map((cat) => {
+                const isCustom = !!cat.id.startsWith("custom_");
                 const catItems = shoppingList.filter((i) => i.category === cat.id);
                 return (
                   <div key={cat.id} style={{ marginBottom: 24 }}>
@@ -2948,6 +3030,15 @@ export default function App() {
                           {catItems.filter((i) => i.checked).length}/{catItems.length}
                         </span>
                       )}
+                      {isCustom && (
+                        <button
+                          style={{ background: "none", fontSize: 13, color: "var(--text3)", padding: "2px 4px" }}
+                          onClick={() => {
+                            if (confirm(`Delete "${cat.label}" and all its items?`)) deleteCustomCat(cat.id);
+                          }}
+                          title="Delete category"
+                        >🗑</button>
+                      )}
                     </div>
                     {catItems.length > 0 && (
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2955,26 +3046,27 @@ export default function App() {
                           const globalIdx = shoppingList.findIndex((i) => i === item);
                           const isExpanded = expandedItems[item.item];
                           const hasBreakdown = item.entries?.length > 1;
+                          const isEditing = editingGroceryIdx === globalIdx;
                           return (
                             <div key={`${item.item}-${item.manual ? "m" : "a"}`} style={{
                               background: "var(--bg2)", borderRadius: "var(--radius3)",
                               border: `1.5px solid ${item.checked ? "var(--border)" : "var(--border2)"}`,
                               overflow: "hidden", transition: "border-color 0.2s",
                             }}>
-                              <div
-                                style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 14px", cursor: "pointer" }}
-                                onClick={() => toggleListItem(globalIdx)}
-                              >
-                                <div style={{
-                                  width: 20, height: 20, borderRadius: 5,
-                                  border: `2px solid ${item.checked ? "var(--accent)" : "var(--border2)"}`,
-                                  background: item.checked ? "var(--accent)" : "transparent",
-                                  display: "flex", alignItems: "center", justifyContent: "center",
-                                  flexShrink: 0, transition: "all 0.15s",
-                                }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 14px" }}>
+                                <div
+                                  style={{
+                                    width: 20, height: 20, borderRadius: 5,
+                                    border: `2px solid ${item.checked ? "var(--accent)" : "var(--border2)"}`,
+                                    background: item.checked ? "var(--accent)" : "transparent",
+                                    display: "flex", alignItems: "center", justifyContent: "center",
+                                    flexShrink: 0, cursor: "pointer", transition: "all 0.15s",
+                                  }}
+                                  onClick={() => toggleListItem(globalIdx)}
+                                >
                                   {item.checked && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
                                 </div>
-                                {item.combinedAmount && (
+                                {item.combinedAmount && !isEditing && (
                                   <span style={{
                                     fontSize: 13, fontWeight: 600,
                                     color: item.checked ? "var(--text3)" : "var(--accent2)",
@@ -2984,20 +3076,36 @@ export default function App() {
                                     {item.combinedAmount}
                                   </span>
                                 )}
-                                <span style={{
-                                  flex: 1, fontSize: 14,
-                                  color: item.checked ? "var(--text3)" : "var(--text)",
-                                  textDecoration: item.checked ? "line-through" : "none",
-                                  transition: "all 0.15s",
-                                }}>{item.item}</span>
-                                {item.manual && (
+                                {isEditing ? (
+                                  <form onSubmit={(e) => { e.preventDefault(); updateListItemText(globalIdx, editingGroceryVal); setEditingGroceryIdx(null); }} style={{ flex: 1 }}>
+                                    <input
+                                      autoFocus
+                                      style={{ ...inputStyle, width: "100%", padding: "4px 8px", fontSize: 14 }}
+                                      value={editingGroceryVal}
+                                      onChange={(e) => setEditingGroceryVal(e.target.value)}
+                                      onBlur={() => { updateListItemText(globalIdx, editingGroceryVal); setEditingGroceryIdx(null); }}
+                                    />
+                                  </form>
+                                ) : (
+                                  <span
+                                    style={{
+                                      flex: 1, fontSize: 14,
+                                      color: item.checked ? "var(--text3)" : "var(--text)",
+                                      textDecoration: item.checked ? "line-through" : "none",
+                                      cursor: "pointer", transition: "all 0.15s",
+                                    }}
+                                    onClick={() => toggleListItem(globalIdx)}
+                                    onDoubleClick={(e) => { e.stopPropagation(); setEditingGroceryIdx(globalIdx); setEditingGroceryVal(item.item); }}
+                                  >{item.item}</span>
+                                )}
+                                {item.manual && !isEditing && (
                                   <button
                                     style={{ background: "none", fontSize: 14, color: "var(--text3)", padding: 2 }}
                                     onClick={(e) => { e.stopPropagation(); removeManualGroceryItem(item.item); }}
                                     title="Remove"
                                   >🗑</button>
                                 )}
-                                {hasBreakdown && (
+                                {hasBreakdown && !isEditing && (
                                   <button
                                     style={{ background: "none", fontSize: 11, color: "var(--text3)", padding: "2px 6px", borderRadius: 4, border: "1px solid var(--border)" }}
                                     onClick={(e) => { e.stopPropagation(); setExpandedItems((prev) => ({ ...prev, [item.item]: !prev[item.item] })); }}
@@ -3029,6 +3137,29 @@ export default function App() {
                 );
               })}
 
+              {/* Add custom store category */}
+              <div style={{ marginBottom: 24 }}>
+                {addingCustomCat ? (
+                  <form onSubmit={(e) => { e.preventDefault(); addCustomCat(newCatName); }} style={{ display: "flex", gap: 6 }}>
+                    <input
+                      autoFocus
+                      style={{ ...inputStyle, flex: 1 }}
+                      placeholder="Store name (e.g. Kmart)"
+                      value={newCatName}
+                      onChange={(e) => setNewCatName(e.target.value)}
+                      onBlur={() => { if (!newCatName.trim()) setAddingCustomCat(false); }}
+                    />
+                    <button type="submit" style={{ ...btnStyle, background: newCatName.trim() ? "var(--accent)" : "var(--bg4)", color: newCatName.trim() ? "#fff" : "var(--text3)", padding: "9px 14px", fontSize: 12 }} disabled={!newCatName.trim()}>Add</button>
+                    <button type="button" style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text3)", padding: "9px 12px", fontSize: 12 }} onClick={() => { setAddingCustomCat(false); setNewCatName(""); }}>✕</button>
+                  </form>
+                ) : (
+                  <button
+                    style={{ ...btnStyle, background: "var(--bg3)", color: "var(--text2)", fontSize: 12, padding: "8px 14px", width: "100%" }}
+                    onClick={() => setAddingCustomCat(true)}
+                  >+ Add store category</button>
+                )}
+              </div>
+
               {/* Fixed extra sections — always visible, persist independently of weekly menu */}
               <ExtraSection
                 title="Cleaning"
@@ -3037,6 +3168,7 @@ export default function App() {
                 onAdd={(text) => addExtraItem("cleaning", text)}
                 onToggle={(id) => toggleExtraItem("cleaning", id)}
                 onRemove={(id) => removeExtraItem("cleaning", id)}
+                onEdit={(id, text) => editExtraItem("cleaning", id, text)}
               />
               <ExtraSection
                 title="Pharmacy"
@@ -3045,6 +3177,7 @@ export default function App() {
                 onAdd={(text) => addExtraItem("pharmacy", text)}
                 onToggle={(id) => toggleExtraItem("pharmacy", id)}
                 onRemove={(id) => removeExtraItem("pharmacy", id)}
+                onEdit={(id, text) => editExtraItem("pharmacy", id, text)}
               />
             </div>
           )}
